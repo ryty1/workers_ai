@@ -13,7 +13,7 @@
 - **一个接口调所有账号**：`/v1/chat/completions` 说完就完，不用自己写重试
 - **失败自动转移**：429/5xx/超时自动换下一个账号，出问题的账号进冷却
 - **额度叠加**：CF 免费额度 10000 神经元/天/账号，N 个账号就是 N 倍
-- **决策模型也能用**：`clef-flash` / `clef-flash` / `clef-omni` 走 `/v1/decide`（Cloudflare 独有的 System One API）
+- **决策模型也能用**：`clef` / `clef-flash` / `clef-omni` 走 `/v1/decide`（Cloudflare 独有的 System One API）
 - **网页控制台**：填表加账号、管 Key、看用量图表、改模型白名单，手机也能用
 - **12 小时会话**：控制台登录过期自动退出，不会长期挂在浏览器里
 
