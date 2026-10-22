@@ -1,0 +1,1154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cfai 控制台</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#141922; --panel2:#1b2230; --line:#26303f;
+    --txt:#e6edf3; --dim:#8b98a9; --acc:#4c9aff; --ok:#3fb950; --warn:#d29922;
+    --bad:#f85149; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
+  a{color:var(--acc);text-decoration:none}
+  button{font:inherit;cursor:pointer;border-radius:8px;border:1px solid var(--line);
+         background:var(--panel2);color:var(--txt);padding:7px 13px;transition:.15s}
+  button:hover{border-color:var(--acc);color:#fff}
+  button.primary{background:var(--acc);border-color:var(--acc);color:#06121f;font-weight:600}
+  button.primary:hover{filter:brightness(1.1)}
+  button.danger:hover{border-color:var(--bad);color:var(--bad)}
+  input,select,textarea{font:inherit;background:#0f141c;color:var(--txt);border:1px solid var(--line);
+         border-radius:8px;padding:8px 10px;width:100%}
+  input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px}
+  header{display:flex;align-items:center;gap:14px;padding:14px 0 18px;border-bottom:1px solid var(--line);margin-bottom:22px}
+  .logo{font-weight:700;font-size:18px;letter-spacing:.5px}
+  .logo span{color:var(--acc)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:6px}
+  .dot.bad{background:var(--bad)}
+  .spacer{flex:1}
+  .tabs{display:flex;gap:6px;margin-bottom:20px;flex-wrap:wrap}
+  .tab{padding:8px 16px;border-radius:9px;color:var(--dim);cursor:pointer;border:1px solid transparent}
+  .tab.on{background:var(--panel2);color:var(--txt);border-color:var(--line)}
+  .grid{display:grid;gap:14px}
+  .cards{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .card .k{color:var(--dim);font-size:12px;letter-spacing:.4px;text-transform:uppercase}
+  .card .v{font-size:26px;font-weight:700;margin-top:6px;font-family:var(--mono)}
+  .card .s{color:var(--dim);font-size:12px;margin-top:4px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:16px}
+  .panel h3{margin:0 0 14px;font-size:15px;font-weight:600}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .badge{font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--line);color:var(--dim)}
+  .badge.ready{color:var(--ok);border-color:#1f6f34;background:#0f2417}
+  .badge.cooling{color:var(--warn);border-color:#6b5217;background:#241f0f}
+  .badge.auth_error{color:var(--bad);border-color:#6b1f1c;background:#241010}
+  .acct{display:flex;flex-direction:column;gap:10px}
+  .acct .top{display:flex;align-items:center;gap:8px}
+  .acct .name{font-weight:600;font-family:var(--mono)}
+  .bar{height:6px;border-radius:4px;background:#0f141c;overflow:hidden}
+  .bar > i{display:block;height:100%;background:var(--acc)}
+  .bar.warn > i{background:var(--warn)}
+  .bar.bad > i{background:var(--bad)}
+  .muted{color:var(--dim);font-size:12px}
+  .mono{font-family:var(--mono)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+  th{color:var(--dim);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+  tr:hover td{background:#121824}
+  .err{color:var(--bad);font-size:12px;word-break:break-all;max-width:420px}
+  .modal{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;padding:20px;z-index:50}
+  .modal.on{display:flex}
+  .modal .box{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;width:100%;max-width:560px;max-height:88vh;display:flex;flex-direction:column}
+  .mbody{overflow:auto;padding-right:6px;flex:1}
+  .mfoot{display:flex;gap:10px;justify-content:flex-end;padding-top:14px;margin-top:6px;border-top:1px solid var(--line)}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:var(--dim);margin-bottom:5px}
+  .hint{font-size:11px;color:var(--dim);margin-top:4px}
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel2);
+         border:1px solid var(--line);border-radius:10px;padding:10px 18px;opacity:0;transition:.25s;pointer-events:none;z-index:99}
+  .toast.on{opacity:1}
+  .toast.ok{border-color:#1f6f34}.toast.bad{border-color:#6b1f1c}
+  .login{max-width:380px;margin:12vh auto;text-align:center}
+  .login h1{font-size:20px;margin-bottom:6px}
+  #chart{display:block}
+  .chartbox{position:relative}
+  .chartscroll{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;padding-bottom:2px}
+  .chartscroll::-webkit-scrollbar{height:6px}
+  .chartscroll::-webkit-scrollbar-thumb{background:#2a3444;border-radius:3px}
+  .chartscroll::-webkit-scrollbar-track{background:transparent}
+  #chart .col{fill:transparent}
+  #chart .hr rect{transition:opacity .12s ease}
+  #chart .hr:hover rect.ok, #chart .hr.on rect.ok{fill:#63e884}
+  #chart .hr:hover rect.bad, #chart .hr.on rect.bad{fill:#ff8b83}
+  #chart.hovering .hr:not(.on) rect:not(.col){opacity:.35}
+  #chart .hr.on rect:not(.col){stroke:#eafff0;stroke-width:1}
+  .tip{position:fixed;z-index:80;pointer-events:none;background:#0f141c;border:1px solid var(--line);
+       border-radius:8px;padding:6px 9px;font-size:12px;line-height:1.5;color:var(--txt);
+       opacity:0;transition:opacity .12s;box-shadow:0 8px 24px #000a;white-space:nowrap}
+  .tip.on{opacity:1}
+  .tip b{color:#fff}
+  .tip .g{color:var(--ok)} .tip .r{color:var(--bad)}
+  .legend{display:flex;gap:16px;font-size:12px;color:var(--dim);margin-top:8px}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
+  .empty{color:var(--dim);text-align:center;padding:26px}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+  .chip{display:inline-block;font-size:11px;font-family:var(--mono);background:#0f141c;border:1px solid var(--line);
+        border-radius:6px;padding:2px 7px;margin:2px 3px 0 0;color:var(--dim)}
+  .tscroll{overflow:auto}
+  .keycell{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+
+  /* ---------- 手机 / 窄屏 ---------- */
+  @media(max-width:760px){
+    .wrap{padding:12px}
+    header{padding:10px 0 14px;margin-bottom:16px;gap:10px;flex-wrap:wrap}
+    .logo{font-size:16px}
+    header .muted{font-size:11px}
+    .tabs{gap:4px;margin-bottom:14px;flex-wrap:nowrap;overflow-x:auto;padding-bottom:4px;
+          scrollbar-width:none;-webkit-overflow-scrolling:touch}
+    .tabs::-webkit-scrollbar{display:none}
+    .tab{padding:7px 13px;font-size:13px;white-space:nowrap;flex:none}
+    .cards{grid-template-columns:repeat(2,1fr);gap:10px}
+    .card{padding:12px}
+    .card .v{font-size:20px}
+    .card .k{font-size:11px}
+    .panel{padding:14px;border-radius:10px;margin-bottom:12px}
+    .panel h3{font-size:14px;margin-bottom:10px}
+    .tscroll{overflow:visible}
+    /* 表格 → 卡片 */
+    table.resp thead{display:none}
+    table.resp,table.resp tbody{display:block}
+    table.resp tr{display:block;border:1px solid var(--line);border-radius:10px;
+                  background:var(--panel2);padding:10px 12px;margin-bottom:10px}
+    table.resp tr:hover td{background:transparent}
+    table.resp td{display:flex;justify-content:space-between;align-items:center;gap:12px;
+                  padding:5px 0;border:0;font-size:13px;text-align:right}
+    table.resp td::before{content:attr(data-label);color:var(--dim);font-size:12px;
+                          flex:none;text-align:left}
+    table.resp td.empty{display:block;text-align:center;padding:20px 0}
+    table.resp td.empty::before{display:none}
+    table.resp td.acts{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;
+                       margin-top:8px;padding-top:10px;border-top:1px dashed var(--line)}
+    table.resp td.acts::before{display:none}
+    table.resp td.acts button{padding:8px 6px;font-size:12px;min-width:0}
+    .keycell{justify-content:flex-end}
+    .err{max-width:none;text-align:right}
+    /* 弹窗改成底部抽屉 */
+    .modal{padding:0;align-items:flex-end;overflow:auto}
+    .modal .box{max-width:none;max-height:92vh;max-height:92dvh;
+                border-radius:14px 14px 0 0;padding:16px}
+    .mfoot{gap:8px}
+    .mfoot button{flex:1}
+    .toast{left:12px;right:12px;transform:none;bottom:12px;text-align:center}
+    .tip{font-size:11px;padding:5px 8px}
+    .grid2{grid-template-columns:1fr 1fr}
+  }
+  @media(max-width:400px){
+    .cards{grid-template-columns:1fr}
+    .grid2{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<div id="loginView" class="wrap" style="display:none">
+  <div class="login">
+    <h1>cfai 控制台</h1>
+    <p class="muted" id="loginHint">输入控制台密码</p>
+    <div class="field" style="margin-top:18px">
+      <input id="loginPw" type="password" placeholder="密码" autocomplete="current-password"
+             onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <button class="primary" style="width:100%" onclick="doLogin()">进入</button>
+    <p class="muted" style="margin-top:14px">首次使用可用网关 API Key 登录，登录后在「设置」里改密码</p>
+  </div>
+</div>
+
+<div id="mainView" class="wrap" style="display:none">
+  <header>
+    <div class="logo">cfai<span>.</span>控制台</div>
+    <span class="muted" id="hdrStatus"><span class="dot"></span>连接中</span>
+    <span class="muted" id="sessLeft" style="font-size:11px;opacity:.75"></span>
+    <div class="spacer"></div>
+    <button onclick="load()">刷新</button>
+    <button onclick="logout()">退出</button>
+  </header>
+
+  <div class="tabs">
+    <div class="tab on" data-tab="overview" onclick="switchTab('overview')">概览</div>
+    <div class="tab" data-tab="accounts" onclick="switchTab('accounts')">账号</div>
+    <div class="tab" data-tab="keys" onclick="switchTab('keys')">KEY</div>
+    <div class="tab" data-tab="models" onclick="switchTab('models')">模型</div>
+    <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
+  </div>
+
+  <!-- 概览 -->
+  <div id="tab-overview">
+    <div class="grid cards" style="margin-bottom:16px">
+      <div class="card"><div class="k">今日请求</div><div class="v" id="sReq">–</div><div class="s" id="sReqSub">–</div></div>
+      <div class="card"><div class="k">成功率</div><div class="v" id="sRate">–</div><div class="s" id="sRateSub">–</div></div>
+      <div class="card"><div class="k">神经元用量</div><div class="v" id="sNeu">–</div><div class="s" id="sNeuSub">–</div></div>
+      <div class="card"><div class="k">剩余额度</div><div class="v" id="sLeft">–</div><div class="s" id="sLeftSub">–</div></div>
+    </div>
+
+    <div class="panel">
+      <h3>API 接入</h3>
+      <div id="apiCard"></div>
+    </div>
+
+    <div class="panel">
+      <h3>最近 24 小时</h3>
+      <div class="chartbox">
+        <div class="chartscroll" id="chartScroll">
+          <svg id="chart"></svg>
+        </div>
+        <div class="tip" id="chartTip"></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--ok)"></i>成功</span>
+        <span><i style="background:var(--bad)"></i>失败</span>
+        <span class="spacer"></span>
+        <span id="chartSum"></span>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:6px">按小时累计；开启本功能之前的历史请求不会出现在图上</div>
+    </div>
+
+    <div class="panel">
+      <h3>账号概览</h3>
+      <div class="grid" id="acctGrid" style="grid-template-columns:repeat(auto-fit,minmax(260px,1fr))"></div>
+    </div>
+  </div>
+
+  <!-- 账号 -->
+  <div id="tab-accounts" style="display:none">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:14px">
+        <h3 style="margin:0">账号列表</h3>
+        <div class="row">
+          <button onclick="testAll()">全部测试</button>
+          <button class="primary" onclick="openAdd()">+ 添加账号</button>
+        </div>
+      </div>
+      <div class="tscroll">
+        <table class="resp">
+          <thead><tr>
+            <th>名称</th><th>类型</th><th>状态</th><th>请求</th><th>失败</th>
+            <th>神经元</th><th>Key</th><th>操作</th>
+          </tr></thead>
+          <tbody id="acctTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- KEY -->
+  <div id="tab-keys" style="display:none">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:14px">
+        <h3 style="margin:0">客户端 API Key</h3>
+        <button class="primary" onclick="openKey()">+ 新建 Key</button>
+      </div>
+      <div class="tscroll">
+        <table class="resp">
+          <thead><tr><th>名称</th><th>Key</th><th>状态</th><th>今日请求</th><th>今日神经元</th><th>限额</th><th>操作</th></tr></thead>
+          <tbody id="keyTable"></tbody>
+        </table>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:10px">
+        客户端用这里任意一个 Key 调用 <span class="mono">/v1</span>；限额按 UTC 天重置，超了返回 429。
+      </div>
+    </div>
+  </div>
+
+  <!-- 模型 -->
+  <div id="tab-models" style="display:none">
+    <div class="panel">
+      <h3>费用试算</h3>
+      <div class="row">
+        <select id="calcModel" style="flex:1;min-width:240px" onchange="calcCost()"></select>
+        <input id="calcIn" type="number" min="0" value="1000" placeholder="输入 tokens" style="width:140px" oninput="calcCost()">
+        <input id="calcOut" type="number" min="0" value="500" placeholder="输出 tokens" style="width:140px" oninput="calcCost()">
+        <span id="calcResult" class="mono" style="font-size:15px"></span>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:8px">按 CF 目录单价估算；“输出免费”的模型只计输入费用。实际以 CF 账单为准。</div>
+    </div>
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:14px">
+        <h3 style="margin:0">模型目录 <span class="muted" id="catMeta"></span>
+          <span class="badge" id="allowMeta" style="margin-left:8px"></span></h3>
+        <div class="row">
+          <label class="muted" style="display:flex;align-items:center;gap:6px;font-size:12px">
+            <input type="checkbox" id="onlyAllowed" style="width:auto" onchange="renderModels()"> 只看已启用
+          </label>
+          <input id="modelQ" placeholder="搜索模型…" style="width:200px" oninput="renderModels()">
+          <button class="primary" onclick="refreshCatalog()">拉取模型</button>
+        </div>
+      </div>
+      <div style="overflow:auto;max-height:56vh">
+        <table>
+          <thead><tr><th style="width:52px">启用</th><th>模型 ID</th><th>任务</th><th>上下文</th><th>输入 $/M</th><th>输出 $/M</th><th>账号</th></tr></thead>
+          <tbody id="modelTable"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div id="tab-settings" style="display:none">
+    <div class="panel">
+      <h3>调度</h3>
+      <div class="grid2">
+        <div class="field"><label>策略</label>
+          <select id="rStrategy">
+            <option value="round_robin">轮询 round_robin</option>
+            <option value="least_used">最少使用 least_used</option>
+            <option value="random">随机 random</option>
+          </select></div>
+        <div class="field"><label>最大重试账号数</label><input id="rRetries" type="number" min="1" max="20"></div>
+        <div class="field"><label>每账号每分钟上限 (0=不限)</label><input id="rRpm" type="number" min="0"></div>
+        <div class="field"><label>冷却秒数</label><input id="rCool" type="number" min="1"></div>
+        <div class="field"><label>冷却上限秒数</label><input id="rCoolMax" type="number" min="1"></div>
+        <div class="field"><label>请求超时秒数</label><input id="rTimeout" type="number" min="1"></div>
+        <div class="field"><label>默认模型</label><input id="rDefault" placeholder="glm"></div>
+        <div class="field"><label>出站 User-Agent</label><input id="rUA" placeholder="cfai/1.0">
+          <div class="hint">所有账号发出的请求头；账号可单独覆盖</div></div>
+        <div class="field"><label>默认每日神经元额度</label><input id="rDefaultNeu" type="number" min="0" placeholder="10000">
+          <div class="hint">账号没单独设置时按此计算剩余额度（CF 免费 10000/天），0=不限</div></div>
+        <div class="field"><label>自动体检间隔（分钟）</label><input id="rHealth" type="number" min="0" placeholder="60">
+          <div class="hint">后台定时真实探测每个账号，0=关闭（关闭后新账号会一直显示「未验证」）</div></div>
+      </div>
+      <button class="primary" onclick="saveRouter()">保存</button>
+    </div>
+
+    <div class="panel">
+      <h3>模型别名</h3>
+      <div id="aliasList" style="margin-bottom:14px"></div>
+      <div class="row">
+        <input id="alName" placeholder="别名，如 glm" style="width:180px">
+        <input id="alTarget" placeholder="@cf/zai-org/glm-4.7-flash" style="flex:1;min-width:220px">
+        <button onclick="addAlias()">添加/更新</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>控制台密码</h3>
+      <div class="row">
+        <input id="pwNew" type="password" placeholder="新密码（至少 6 位）" style="max-width:260px">
+        <input id="pwNew2" type="password" placeholder="再输一次" style="max-width:260px">
+        <button onclick="savePassword()">修改密码</button>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:8px">改完密码后其他设备需要重新登录；客户端 API Key 不受影响。</div>
+    </div>
+  </div>
+</div>
+
+<!-- 添加/编辑账号 -->
+<div class="modal" id="acctModal">
+  <div class="box">
+    <h3 id="mTitle" style="margin-top:0">添加账号</h3>
+    <div class="mbody">
+    <div class="field"><label>名称</label><input id="mName" placeholder="cf-09"></div>
+    <div class="field"><label>类型</label>
+      <select id="mType" onchange="toggleType()">
+        <option value="openai">openai（Worker / 反代 / CF ai/v1 地址）</option>
+        <option value="cloudflare">cloudflare（account_id + token）</option>
+      </select>
+    </div>
+    <div id="fOpenai">
+      <div class="field"><label>Base URL</label>
+        <input id="mBase" placeholder="https://api.cloudflare.com/client/v4/accounts/xxx/ai/v1">
+        <div class="hint">会自动补 /chat/completions；决策模型走 /ai/run</div></div>
+      <div class="field"><label>API Key</label><input id="mKey" placeholder="cfut_..."></div>
+    </div>
+    <div id="fCf" style="display:none">
+      <div class="field"><label>Account ID</label><input id="mAcctId" placeholder="32 位 hex"></div>
+      <div class="field"><label>API Token</label><input id="mToken" placeholder="cfut_..."></div>
+    </div>
+    <div class="grid2">
+      <div class="field"><label>每日请求上限</label><input id="mDailyReq" type="number" min="0" placeholder="不限"></div>
+      <div class="field"><label>每日神经元上限</label><input id="mDailyNeu" type="number" min="0" placeholder="如 10000"></div>
+      <div class="field"><label>每分钟请求上限</label><input id="mRpm" type="number" min="0" placeholder="不限"></div>
+    </div>
+    <div class="field"><label>模型白名单（逗号分隔，留空=全部）</label>
+      <input id="mModels" placeholder="@cf/zai-org/glm-4.7-flash,@cf/meta/*"></div>
+    <div class="field"><label>出站 User-Agent（留空用全局设置）</label>
+      <input id="mUA" placeholder="cfai/1.0">
+      <div class="hint">仅影响该账号发出的请求头，用于标识客户端身份</div></div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:8px;color:var(--txt)">
+        <input type="checkbox" id="mVerify" checked style="width:auto"> 保存后立即真实探测一次
+      </label>
+      <div class="hint">不探测的话状态会显示「未验证」，直到下一次自动体检或手动测试</div>
+    </div>
+    </div>
+    <div class="mfoot">
+      <button onclick="closeModal()">取消</button>
+      <button class="primary" onclick="submitAccount()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建/编辑 Key -->
+<div class="modal" id="keyModal">
+  <div class="box">
+    <h3 id="kTitle" style="margin-top:0">新建 Key</h3>
+    <div class="mbody">
+      <div class="field"><label>名称</label><input id="kName" placeholder="比如 cherry-studio"></div>
+      <div class="field"><label>Key</label>
+        <div class="row" style="gap:8px">
+          <input id="kKey" placeholder="留空自动生成" style="flex:1">
+          <button onclick="genKey()">自动生成</button>
+        </div>
+        <div class="hint">客户端用这个 Key 调 /v1</div></div>
+      <div class="grid2">
+        <div class="field"><label>每日请求上限</label><input id="kReq" type="number" min="0" placeholder="不限"></div>
+        <div class="field"><label>每日神经元上限</label><input id="kNeu" type="number" min="0" placeholder="不限"></div>
+      </div>
+      <div class="field"><label>备注</label><input id="kNote" placeholder="用途说明"></div>
+    </div>
+    <div class="mfoot">
+      <button onclick="closeKey()">取消</button>
+      <button class="primary" onclick="submitKey()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SESS_KEY = 'cfai_sess';
+let TOKEN = '', EXP = 0;          // EXP: 毫秒时间戳
+try{
+  const s = JSON.parse(localStorage.getItem(SESS_KEY) || 'null');
+  if (s && s.token && (s.exp || 0) * 1000 > Date.now()){ TOKEN = s.token; EXP = s.exp * 1000; }
+  else if (s) localStorage.removeItem(SESS_KEY);
+}catch(e){ localStorage.removeItem(SESS_KEY); }
+localStorage.removeItem('cfai_token');   // 旧版本存的是密码哈希，不再当会话用
+let SNAP = null;
+let MODELS = [];
+let ALLOW = [];
+let EDITING = null;
+let EDIT_KEY = null;
+
+const $ = id => document.getElementById(id);
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function toast(msg, kind='ok'){
+  const t = $('toast'); t.textContent = msg; t.className = 'toast on ' + kind;
+  clearTimeout(t._h); t._h = setTimeout(()=>t.className='toast', 2600);
+}
+
+async function api(path, opts={}){
+  const o = Object.assign({headers:{}}, opts);
+  o.headers = Object.assign({'Authorization':'Bearer '+TOKEN}, o.headers);
+  if (o.body && typeof o.body !== 'string'){ o.headers['Content-Type']='application/json'; o.body = JSON.stringify(o.body); }
+  const r = await fetch(path, o);
+  if (r.status === 401){ logout(); throw new Error('登录已失效'); }
+  const txt = await r.text();
+  let data; try{ data = JSON.parse(txt); }catch(e){ data = {raw: txt}; }
+  if (!r.ok) throw new Error((data.error && data.error.message) || ('HTTP '+r.status));
+  return data;
+}
+
+async function doLogin(){
+  const pw = $('loginPw').value.trim();
+  if (!pw) return;
+  try{
+    const r = await fetch('/admin/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: pw})
+    });
+    const d = await r.json();
+    if (!r.ok) { toast((d.error && d.error.message) || '登录失败', 'bad'); return; }
+    TOKEN = d.token;
+    EXP = (d.expires_at || (Math.floor(Date.now()/1000) + (d.expires_in || 43200))) * 1000;
+    localStorage.setItem(SESS_KEY, JSON.stringify({token: TOKEN, exp: Math.floor(EXP/1000)}));
+    $('loginPw').value = '';
+    if (!d.has_password) toast('尚未设置控制台密码，去「设置」里设一个');
+    boot();
+  }catch(e){ toast('登录失败: ' + e.message, 'bad'); }
+}
+function logout(msg){
+  if (TOKEN) { try{ fetch('/admin/api/logout', {method:'POST', headers:{'Authorization':'Bearer '+TOKEN}}); }catch(e){} }
+  localStorage.removeItem(SESS_KEY); TOKEN=''; EXP=0;
+  $('mainView').style.display='none'; $('loginView').style.display='block';
+  $('loginPw').value='';
+  if (msg) toast(msg, 'bad');
+}
+function sessionLeft(){
+  if (!EXP) return 0;
+  return Math.max(0, Math.floor((EXP - Date.now())/1000));
+}
+function fmtLeft(s){
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  return h + ':' + String(m).padStart(2,'0');
+}
+function tickSession(){
+  if (!TOKEN) return;
+  const left = sessionLeft();
+  const el = $('sessLeft');
+  if (left <= 0){ logout('登录已超过 12 小时，请重新登录'); return; }
+  if (el) el.textContent = '会话 ' + fmtLeft(left);
+}
+setInterval(tickSession, 30000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) tickSession(); });
+
+function boot(){
+  if (!TOKEN){ $('loginView').style.display='block'; $('mainView').style.display='none'; return; }
+  if (sessionLeft() <= 0){ logout('登录已过期，请重新登录'); return; }
+  $('loginView').style.display='none'; $('mainView').style.display='block';
+  tickSession();
+  load();
+}
+
+async function load(){
+  try{
+    SNAP = await api('/admin/api/snapshot');
+    $('hdrStatus').innerHTML = '<span class="dot"></span>' + SNAP.totals.ready + '/' + SNAP.totals.accounts + ' 账号就绪';
+    renderOverview(); renderAccounts(); renderKeys(); renderSettings(); renderApiCard();
+    if (document.querySelector('[data-tab=models]').classList.contains('on')) await loadModels();
+  }catch(e){
+    $('hdrStatus').innerHTML = '<span class="dot bad"></span>' + esc(e.message);
+  }
+}
+
+/* ---------- 概览 ---------- */
+function renderOverview(){
+  const t = SNAP.totals;
+  $('sReq').textContent = t.requests;
+  $('sReqSub').textContent = `成功 ${t.ok} · 失败 ${t.fail}`;
+  const rate = t.requests ? (t.ok / t.requests * 100) : 100;
+  $('sRate').textContent = rate.toFixed(1) + '%';
+  $('sRate').style.color = rate >= 99 ? 'var(--ok)' : rate >= 90 ? 'var(--warn)' : 'var(--bad)';
+  $('sRateSub').textContent = `失败 ${t.fail} 次`;
+  $('sNeu').textContent = fmt(t.neurons);
+  $('sNeuSub').textContent = `输入 ${fmt(t.tokens_in)} / 输出 ${fmt(t.tokens_out)} tokens`;
+  if (t.budget > 0){
+    $('sLeft').textContent = fmt(t.remaining);
+    const cd = fmtCountdown(SNAP.reset_in);
+    $('sLeftSub').textContent = `总额 ${fmt(t.budget)} · ${cd} 后重置`;
+    $('sLeft').style.color = t.remaining / t.budget < .15 ? 'var(--bad)' : 'var(--ok)';
+  } else {
+    $('sLeft').textContent = '未设上限';
+    $('sLeftSub').textContent = '给账号设置每日神经元上限后可显示';
+    $('sLeft').style.color = 'var(--dim)';
+  }
+  drawChart(SNAP.hourly);
+  renderAcctCards();
+}
+
+function fmt(n){
+  n = Number(n || 0);
+  if (n >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'k';
+  return (Math.round(n*100)/100).toString();
+}
+
+function fmtExact(n){
+  n = Number(n || 0);
+  const r = Math.round(n * 100) / 100;
+  return r.toLocaleString('en-US', {maximumFractionDigits: 2});
+}
+
+function fmtCountdown(sec){
+  sec = Number(sec || 0);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60);
+  if (h > 0) return h + 'h' + (m ? m + 'm' : '');
+  return m + 'm';
+}
+
+function drawChart(hours){
+  const wrap = $('chartScroll'), svg = $('chart'), tip = $('chartTip');
+  const H = 190, padX = 8, tipRoom = 44;          // 顶部留出气泡的位置
+  const narrow = innerWidth < 760;
+  const SLOT = narrow ? 34 : 42;                 // 每小时最小占位；放不下才横向滚动
+  const avail = wrap.clientWidth || 600;
+  const W = Math.max(avail, hours.length * SLOT + padX * 2);
+  const slot = (W - padX * 2) / hours.length;
+  const bw = Math.max(8, Math.round(slot * 0.7));    // 柱子宽度
+  const plotH = H - 26 - tipRoom;
+  const max = Math.max(1, ...hours.map(h => h.ok + h.fail));
+  const nearEnd = wrap.scrollWidth - wrap.scrollLeft - wrap.clientWidth < 40;
+
+  let s = '';
+  hours.forEach((h, i) => {
+    const cx = padX + slot * (i + 0.5);
+    const x = cx - bw / 2;
+    const total = h.ok + h.fail;
+    const hOk = (h.ok / max) * plotH;
+    const hBad = (h.fail / max) * plotH;
+    s += `<g class="hr" data-i="${i}">`;
+    if (total > 0){
+      if (hOk > 0) s += `<rect class="ok" x="${x}" y="${H-20-hOk}" width="${bw}" height="${hOk}" fill="#3fb950" rx="2"/>`;
+      if (hBad > 0) s += `<rect class="bad" x="${x}" y="${H-20-hOk-hBad}" width="${bw}" height="${hBad}" fill="#f85149" rx="2"/>`;
+    } else {
+      s += `<rect class="zero" x="${x}" y="${H-22}" width="${bw}" height="2" fill="#26303f" rx="1"/>`;
+    }
+    s += `<rect class="col" x="${padX + slot*i}" y="0" width="${slot}" height="${H}"/></g>`;
+    if (i % 2 === 0)
+      s += `<text x="${cx}" y="${H-6}" fill="#5b6878" font-size="10" text-anchor="middle" pointer-events="none">${h.h}</text>`;
+  });
+
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.style.width = W + 'px';
+  svg.style.height = H + 'px';
+  svg.innerHTML = s;
+  svg._hours = hours;
+  if (nearEnd) wrap.scrollLeft = wrap.scrollWidth;   // 默认停在最新一小时
+
+  const show = i => {
+    const h = hours[i];
+    const g = svg.querySelector(`.hr[data-i="${i}"]`);
+    if (!g) return;
+    let topY = H - 20;
+    g.querySelectorAll('rect:not(.col)').forEach(b => {
+      const y = parseFloat(b.getAttribute('y'));
+      if (y < topY) topY = y;
+    });
+    const r = svg.getBoundingClientRect();
+    const px = r.left + padX + slot * (i + 0.5);   // 柱子中心（1 单位 = 1px）
+    const py = r.top + topY;                       // 柱子顶端
+    const total = h.ok + h.fail;
+    tip.innerHTML = `<b>${esc(h.h)}</b> · ` + (total
+      ? `<span class="g">成功 ${h.ok}</span> · <span class="r">失败 ${h.fail}</span> · 共 ${total} 次`
+      : '<span class="muted">无请求</span>');
+    tip.classList.add('on');
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let left = Math.max(10, Math.min(px - tw / 2, innerWidth - tw - 10));
+    let top = py - th - 3;                 // 气泡底边贴着柱顶
+    if (top < 8) top = py + 10;
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+    svg.querySelectorAll('.hr.on').forEach(e => e.classList.remove('on'));
+    g.classList.add('on');
+    svg.classList.add('hovering');
+  };
+  const hide = () => {
+    tip.classList.remove('on');
+    svg.classList.remove('hovering');
+    svg.querySelectorAll('.hr.on').forEach(e => e.classList.remove('on'));
+  };
+  const idxAt = ev => {
+    const r = svg.getBoundingClientRect();
+    return Math.min(hours.length - 1, Math.max(0, Math.floor((ev.clientX - r.left - padX) / slot)));
+  };
+  svg.onmousemove = ev => show(idxAt(ev));
+  svg.onmouseleave = hide;
+  svg.onclick = ev => {
+    show(idxAt(ev));
+    clearTimeout(svg._h); svg._h = setTimeout(hide, 2600);
+  };
+
+  const sum = hours.reduce((a,h)=>a+h.ok+h.fail,0);
+  const today = (SNAP && SNAP.totals) ? SNAP.totals.requests : 0;
+  $('chartSum').textContent = sum
+    ? `24 小时 ${sum} 次 · 峰值 ${max} · 今日累计 ${today} 次`
+    : (today ? `今日累计 ${today} 次，暂无小时明细` : '暂无数据');
+}
+
+let _rszT = 0;
+addEventListener('resize', () => {
+  clearTimeout(_rszT);
+  _rszT = setTimeout(() => { if (SNAP && SNAP.hourly) drawChart(SNAP.hourly); }, 150);
+});
+
+function statusBadge(a){
+  if (a.status === 'ready') return '<span class="badge ready" title="最近体检通过">就绪</span>';
+  if (a.status === 'cooling') return `<span class="badge cooling">冷却 ${a.cooldown_left}s</span>`;
+  if (a.status === 'unverified') return '<span class="badge" title="还没做过真实探测">未验证</span>';
+  if (a.status === 'error') return '<span class="badge auth_error" title="最近体检失败">异常</span>';
+  return '<span class="badge auth_error">鉴权失败</span>';
+}
+
+function renderAcctCards(){
+  const el = $('acctGrid');
+  if (!SNAP.accounts.length){ el.innerHTML = '<div class="empty">还没有账号，去「账号」页添加</div>'; return; }
+  el.innerHTML = SNAP.accounts.map(a => {
+    const pct = a.budget ? Math.min(100, a.neurons / a.budget * 100) : 0;
+    const cls = pct > 85 ? 'bad' : pct > 60 ? 'warn' : '';
+    return `<div class="card acct">
+      <div class="top"><span class="name">${esc(a.name)}</span>${statusBadge(a)}<span class="spacer"></span>
+        <span class="muted mono">${a.type}</span></div>
+      <div class="row" style="gap:18px">
+        <span class="muted">请求 <b class="mono" style="color:var(--txt)">${a.requests}</b></span>
+        <span class="muted">失败 <b class="mono" style="color:${a.fail?'var(--bad)':'var(--txt)'}">${a.fail}</b></span>
+        <span class="muted">神经元 <b class="mono" style="color:var(--txt)">${fmt(a.neurons)}</b></span>
+      </div>
+      ${a.budget ? `<div class="bar ${cls}"><i style="width:${pct}%"></i></div>
+        <div class="muted">剩余 ${fmtExact(a.remaining)} / ${fmtExact(a.budget)}${a.budget_is_default ? ' · 默认额度' : ''} · 已用 ${fmtExact(a.neurons)}</div>` : '<div class="muted">未设额度上限</div>'}
+      ${a.last_error ? `<div class="err" title="${esc(a.last_error)}">${esc(a.last_error.slice(0,90))}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+/* ---------- 账号 ---------- */
+function renderAccounts(){
+  const tb = $('acctTable');
+  if (!SNAP.accounts.length){ tb.innerHTML = '<tr><td colspan="8" class="empty">暂无账号</td></tr>'; return; }
+  tb.innerHTML = SNAP.accounts.map(a => `<tr>
+    <td class="mono" data-label="名称">${esc(a.name)}</td>
+    <td data-label="类型"><span class="badge">${a.type}</span></td>
+    <td data-label="状态">${statusBadge(a)}</td>
+    <td class="mono" data-label="请求">${a.requests}</td>
+    <td class="mono" data-label="失败" style="color:${a.fail?'var(--bad)':'inherit'}">${a.fail}</td>
+    <td class="mono" data-label="神经元">${fmt(a.neurons)}</td>
+    <td class="mono muted" data-label="Key">${esc(a.key_hint)}</td>
+    <td class="acts">
+      <button onclick="testOne('${esc(a.name)}')">测试</button>
+      <button onclick="editAccount('${esc(a.name)}')">编辑</button>
+      <button onclick="resetOne('${esc(a.name)}')">重置</button>
+      <button onclick="calibrate('${esc(a.name)}', ${a.neurons})">校准</button>
+      <button class="danger" onclick="delOne('${esc(a.name)}')">删除</button>
+    </td></tr>`).join('');
+}
+
+async function testOne(name){
+  toast('测试 ' + name + ' …');
+  try{
+    const r = await api('/admin/api/accounts/' + encodeURIComponent(name) + '/test', {method:'POST', body:{}});
+    toast(r.ok ? `${name} OK · ${r.ms}ms` : `${name} 失败：${r.error}`, r.ok ? 'ok' : 'bad');
+  }catch(e){ toast(e.message, 'bad'); }
+  load();
+}
+async function testAll(){
+  toast('逐个测试中…');
+  for (const a of SNAP.accounts){
+    try{ await api('/admin/api/accounts/'+encodeURIComponent(a.name)+'/test', {method:'POST', body:{}}); }catch(e){}
+  }
+  toast('测试完成'); load();
+}
+async function resetOne(name){
+  try{ await api('/admin/api/accounts/'+encodeURIComponent(name)+'/reset', {method:'POST', body:{}}); toast(name+' 已重置'); }
+  catch(e){ toast(e.message,'bad'); }
+  load();
+}
+async function calibrate(name, cur){
+  const v = prompt(`把 ${name} 今天的「已用神经元」改成多少？\n（填 Cloudflare 后台看到的数字，用于和本网关统计对齐）`, Math.round(cur));
+  if (v === null) return;
+  const n = Number(v);
+  if (!isFinite(n) || n < 0) return toast('请输入数字', 'bad');
+  try{ await api('/admin/api/accounts/'+encodeURIComponent(name)+'/calibrate', {method:'POST', body:{neurons:n}});
+       toast(name + ' 已校准为 ' + n); }
+  catch(e){ toast(e.message,'bad'); }
+  load();
+}
+async function delOne(name){
+  if (!confirm('删除账号 ' + name + '？')) return;
+  try{ await api('/admin/api/accounts/'+encodeURIComponent(name), {method:'DELETE'}); toast('已删除'); }
+  catch(e){ toast(e.message,'bad'); }
+  load();
+}
+
+/* ---------- 添加/编辑 ---------- */
+function toggleType(){
+  const t = $('mType').value;
+  $('fOpenai').style.display = t === 'openai' ? '' : 'none';
+  $('fCf').style.display = t === 'cloudflare' ? '' : 'none';
+}
+function openAdd(){
+  EDITING = null; $('mTitle').textContent = '添加账号';
+  ['mName','mBase','mKey','mAcctId','mToken','mModels','mUA'].forEach(i => $(i).value = '');
+  ['mDailyReq','mDailyNeu','mRpm'].forEach(i => $(i).value = '');
+  $('mType').value = 'openai'; toggleType();
+  $('mName').disabled = false;
+  $('acctModal').classList.add('on');
+}
+function editAccount(name){
+  const a = SNAP.accounts.find(x => x.name === name); if (!a) return;
+  EDITING = name; $('mTitle').textContent = '编辑账号 ' + name;
+  $('mName').value = a.name; $('mName').disabled = false;
+  $('mType').value = a.type; toggleType();
+  $('mBase').value = a.type === 'openai' ? a.target : '';
+  $('mAcctId').value = a.type === 'cloudflare' ? a.target : '';
+  $('mKey').value = ''; $('mToken').value = '';
+  $('mDailyReq').value = a.daily_requests || '';
+  $('mDailyNeu').value = a.budget || '';
+  $('mRpm').value = a.rpm || '';
+  $('mModels').value = (a.models || []).join(',');
+  $('mUA').value = a.user_agent || '';
+  $('acctModal').classList.add('on');
+}
+function closeModal(){ $('acctModal').classList.remove('on'); }
+
+async function submitAccount(){
+  const type = $('mType').value;
+  const body = {
+    name: $('mName').value.trim(),
+    type,
+    base_url: $('mBase').value.trim(),
+    api_key: $('mKey').value.trim(),
+    account_id: $('mAcctId').value.trim(),
+    token: $('mToken').value.trim(),
+    models: $('mModels').value.trim(),
+    user_agent: $('mUA').value.trim(),
+    verify: !EDITING && $('mVerify').checked,
+    daily_requests: $('mDailyReq').value,
+    daily_neurons: $('mDailyNeu').value,
+    rpm: $('mRpm').value,
+  };
+  try{
+    if (EDITING){
+      await api('/admin/api/accounts/'+encodeURIComponent(EDITING), {method:'PATCH', body});
+      toast('已保存');
+    } else {
+      const r = await api('/admin/api/accounts', {method:'POST', body});
+      if (r.verify){
+        toast(r.verify.ok ? `已添加，探测通过 ${r.verify.ms}ms` : `已添加，但探测失败：${r.verify.error}`,
+              r.verify.ok ? 'ok' : 'bad');
+      } else {
+        toast('已添加（未验证）');
+      }
+    }
+    closeModal(); load();
+  }catch(e){ toast(e.message, 'bad'); }
+}
+
+/* ---------- 首页 API 接入卡 ---------- */
+let apiKeyShown = false;
+
+async function copyText(text, label){
+  const legacy = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch(e) { ok = false; }
+    ta.remove();
+    return ok;
+  };
+  try{
+    if (navigator.clipboard && window.isSecureContext){
+      try { await navigator.clipboard.writeText(text); toast('已复制 ' + label); return; }
+      catch(e){ /* 退回 execCommand */ }
+    }
+    if (legacy()){ toast('已复制 ' + label); return; }
+    toast('浏览器拒绝了剪贴板，请手动选中复制', 'bad');
+  }catch(e){ toast('复制失败', 'bad'); }
+}
+
+function renderApiCard(){
+  const el = $('apiCard');
+  if (!SNAP || !el) return;
+  const base = SNAP.base_url || '';
+  const keys = (SNAP.keys || []).filter(k => k.enabled);
+  const k = keys[0];
+  const models = SNAP.models_public || [];
+  const btn = 'padding:2px 8px;font-size:11px;margin-left:6px';
+  const keyCell = k
+    ? `<span class="mono" id="apiKeyVal">${esc(apiKeyShown ? k.key : maskKey(k.key))}</span>
+       <button style="${btn}" onclick="apiKeyShown=!apiKeyShown;renderApiCard()">${apiKeyShown ? '隐藏' : '显示'}</button>
+       <button style="${btn}" onclick="copyText('${esc(k.key)}','API Key')">复制</button>
+       <span class="muted" style="margin-left:6px">（${esc(k.name)}）</span>`
+    : `<span class="muted">还没有 Key，去「KEY」页创建一个</span>`;
+  el.innerHTML = `
+    <div class="row" style="gap:10px;margin-bottom:10px">
+      <span class="muted" style="width:88px;flex:none">Base URL</span>
+      <span class="mono" style="flex:1;word-break:break-all">${esc(base)}</span>
+      <button style="${btn}" onclick="copyText('${esc(base)}','Base URL')">复制</button>
+    </div>
+    <div class="row" style="gap:10px;margin-bottom:10px">
+      <span class="muted" style="width:88px;flex:none">API Key</span>
+      <span style="flex:1">${keyCell}</span>
+    </div>
+    <div class="row" style="gap:10px">
+      <span class="muted" style="width:88px;flex:none">可用模型</span>
+      <span style="flex:1">${models.length
+        ? models.map(m => `<span class="chip">${esc(m)}</span>`).join('')
+        : '<span class="muted">未配置白名单</span>'}</span>
+    </div>`;
+}
+
+/* ---------- KEY ---------- */
+function maskKey(k){ return k ? k.slice(0,6) + '…' + k.slice(-4) : ''; }
+
+function renderKeys(){
+  const rows = (SNAP && SNAP.keys) || [];
+  const tb = $('keyTable');
+  if (!rows.length){
+    tb.innerHTML = '<tr><td colspan="7" class="empty">还没有 Key，点「新建 Key」生成一个</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(k => {
+    const lim = [];
+    if (k.daily_requests) lim.push(k.daily_requests + ' 次/天');
+    if (k.daily_neurons) lim.push(fmt(k.daily_neurons) + ' 神经元/天');
+    return `<tr>
+      <td class="mono" data-label="名称">${esc(k.name)}</td>
+      <td data-label="Key"><div class="keycell">
+          <span class="mono" id="kv-${esc(k.name)}">${esc(maskKey(k.key))}</span>
+          <button style="padding:2px 8px;font-size:11px"
+            onclick="toggleKeyShow('${esc(k.name)}')">显示</button>
+          <button style="padding:2px 8px;font-size:11px"
+            onclick="copyKey('${esc(k.name)}')">复制</button>
+        </div></td>
+      <td data-label="状态">${k.enabled ? '<span class="badge ready">启用</span>' : '<span class="badge auth_error">停用</span>'}</td>
+      <td class="mono" data-label="今日请求">${k.requests}</td>
+      <td class="mono" data-label="今日神经元">${fmt(k.neurons)}</td>
+      <td class="muted" data-label="限额">${lim.length ? lim.join(' · ') : '不限'}</td>
+      <td class="acts">
+        <button onclick="editKey('${esc(k.name)}')">编辑</button>
+        <button onclick="toggleKeyEnabled('${esc(k.name)}', ${k.enabled ? 'false' : 'true'})">${k.enabled ? '停用' : '启用'}</button>
+        <button class="danger" onclick="delKey('${esc(k.name)}')">删除</button>
+      </td></tr>`;
+  }).join('');
+}
+async function copyKey(name){
+  const k = (SNAP.keys || []).find(x => x.name === name);
+  if (!k) return;
+  const legacy = () => {
+    const ta = document.createElement('textarea');
+    ta.value = k.key;
+    ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, k.key.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch(e) { ok = false; }
+    ta.remove();
+    return ok;
+  };
+  try{
+    if (navigator.clipboard && window.isSecureContext){
+      try { await navigator.clipboard.writeText(k.key); toast('已复制 ' + name + ' 的 Key'); return; }
+      catch(e){ /* 权限被拒，退回 execCommand */ }
+    }
+    if (legacy()){ toast('已复制 ' + name + ' 的 Key'); return; }
+    toast('浏览器拒绝了剪贴板，请点「显示」后手动复制', 'bad');
+  }catch(e){
+    toast('复制失败，请点「显示」后手动复制', 'bad');
+  }
+}
+function toggleKeyShow(name){
+  const k = (SNAP.keys || []).find(x => x.name === name);
+  const el = $('kv-' + name);
+  if (!k || !el) return;
+  el.textContent = (el.textContent === maskKey(k.key)) ? k.key : maskKey(k.key);
+}
+function openKey(){
+  EDIT_KEY = null;
+  $('kTitle').textContent = '新建 Key';
+  ['kName','kKey','kReq','kNeu','kNote'].forEach(i => $(i).value = '');
+  $('kName').disabled = false;
+  $('keyModal').classList.add('on');
+}
+function genKey(){
+  const b = crypto.getRandomValues(new Uint8Array(20));
+  $('kKey').value = 'sk-' + Array.from(b).map(x => x.toString(16).padStart(2,'0')).join('');
+}
+function editKey(name){
+  const k = (SNAP.keys || []).find(x => x.name === name);
+  if (!k) return;
+  EDIT_KEY = name;
+  $('kTitle').textContent = '编辑 Key · ' + name;
+  $('kName').value = k.name; $('kName').disabled = false;
+  $('kKey').value = ''; $('kKey').placeholder = '留空不修改（当前 ' + maskKey(k.key) + '）';
+  $('kReq').value = k.daily_requests || '';
+  $('kNeu').value = k.daily_neurons || '';
+  $('kNote').value = k.note || '';
+  $('keyModal').classList.add('on');
+}
+function closeKey(){ $('keyModal').classList.remove('on'); }
+async function submitKey(){
+  const body = {
+    name: $('kName').value.trim(),
+    key: $('kKey').value.trim(),
+    daily_requests: $('kReq').value,
+    daily_neurons: $('kNeu').value,
+    note: $('kNote').value.trim(),
+  };
+  try{
+    if (EDIT_KEY){
+      await api('/admin/api/keys/' + encodeURIComponent(EDIT_KEY), {method:'PATCH', body});
+      toast('已保存');
+    } else {
+      const r = await api('/admin/api/keys', {method:'POST', body});
+      toast('已创建：' + r.key.key);
+    }
+    closeKey(); load();
+  }catch(e){ toast(e.message, 'bad'); }
+}
+async function toggleKeyEnabled(name, on){
+  try{ await api('/admin/api/keys/' + encodeURIComponent(name), {method:'PATCH', body:{enabled:on}});
+       toast(on ? '已启用' : '已停用'); load(); }
+  catch(e){ toast(e.message, 'bad'); }
+}
+async function delKey(name){
+  if (!confirm('删除 Key ' + name + '？用它的客户端会立即失效')) return;
+  try{ await api('/admin/api/keys/' + encodeURIComponent(name), {method:'DELETE'}); toast('已删除'); load(); }
+  catch(e){ toast(e.message, 'bad'); }
+}
+
+async function savePassword(){
+  const a = $('pwNew').value, b = $('pwNew2').value;
+  if (a.length < 6) return toast('密码至少 6 位', 'bad');
+  if (a !== b) return toast('两次输入不一致', 'bad');
+  try{
+    const r = await api('/admin/api/password', {method:'POST', body:{password:a}});
+    $('pwNew').value = ''; $('pwNew2').value = '';
+    toast('密码已更新，所有会话已失效，请用新密码重新登录');
+    setTimeout(() => logout(), 900);
+  }catch(e){ toast(e.message, 'bad'); }
+}
+
+/* ---------- 模型 ---------- */
+async function loadModels(){
+  try{
+    const d = await api('/admin/api/models');
+    MODELS = d.models || [];
+    ALLOW = d.allowed_models || [];
+    $('catMeta').textContent = MODELS.length ? `（${MODELS.length} 个）` : '';
+    $('allowMeta').textContent = ALLOW.length ? `已启用 ${ALLOW.length}` : '未限制（全部可用）';
+    $('allowMeta').className = 'badge' + (ALLOW.length ? ' ready' : '');
+    renderModels();
+  }catch(e){ toast(e.message,'bad'); }
+}
+function toggleAllow(id, on){
+  let list = ALLOW.slice();
+  if (!list.length && !on){
+    // 从"不限制"切到白名单：以当前全部模型为基准
+    list = MODELS.map(m => m.id);
+  }
+  const aliases = (SNAP && SNAP.aliases) || {};
+  // 列表里可能存的是别名（如 glm），而勾选框操作的是真实 id，两个都要匹配
+  const equiv = [id, ...Object.keys(aliases).filter(k => aliases[k] === id)];
+  if (on){
+    if (!equiv.some(x => list.includes(x))) list.push(id);
+  } else {
+    list = list.filter(x => !equiv.includes(x));
+  }
+  ALLOW = list;
+  api('/admin/api/models/allow', {method:'POST', body:{ids:list}})
+    .then(() => {
+      $('allowMeta').textContent = ALLOW.length ? `已启用 ${ALLOW.length}` : '未限制（全部可用）';
+      $('allowMeta').className = 'badge' + (ALLOW.length ? ' ready' : '');
+      toast(on ? '已启用 ' + id.split('/').pop() : '已停用 ' + id.split('/').pop());
+      loadModels();
+    })
+    .catch(e => toast(e.message, 'bad'));
+}
+function renderModels(){
+  const q = ($('modelQ').value || '').toLowerCase();
+  const onlyOn = $('onlyAllowed').checked;
+  const rows = MODELS.filter(m => (!q || m.id.toLowerCase().includes(q) || (m.task||'').toLowerCase().includes(q))
+                                   && (!onlyOn || m.allowed));
+  const price = (m, isOut) => {
+    const extra = (m.price_other && m.price_other[0])
+      ? `${m.price_other[0].price}/${String(m.price_other[0].unit || '').replace('per ', '')}` : null;
+    if (isOut) {
+      if (m.price_out !== null && m.price_out !== undefined) return '<span class="mono">' + m.price_out + '</span>';
+      if (m.price_in !== null && m.price_in !== undefined) return '<span class="badge ready" style="font-size:10px">免费</span>';
+      return '<span class="muted">–</span>';
+    }
+    if (m.price_in !== null && m.price_in !== undefined) return '<span class="mono">' + m.price_in + '</span>';
+    if (extra) return '<span class="mono muted" style="font-size:11px">' + extra + '</span>';
+    return '<span class="muted">–</span>';
+  };
+  $('modelTable').innerHTML = rows.length ? rows.map(m => `<tr>
+      <td><input type="checkbox" style="width:auto" ${m.allowed ? 'checked' : ''} onchange="toggleAllow('${esc(m.id)}', this.checked)"></td>
+      <td class="mono">${esc(m.id)}</td>
+      <td class="muted">${esc(m.task || '–')}</td>
+      <td class="mono muted">${m.context || '–'}</td>
+      <td>${price(m, false)}</td>
+      <td>${price(m, true)}</td>
+      <td class="mono">${m.accounts}</td>
+    </tr>`).join('') : '<tr><td colspan="7" class="empty">没有匹配的模型，点「拉取模型」试试</td></tr>';
+  fillCalcSelect();
+}
+function fillCalcSelect(){
+  const sel = $('calcModel');
+  if (sel.options.length === MODELS.length) return;
+  sel.innerHTML = MODELS.map(m => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
+  const def = (SNAP && SNAP.router && SNAP.router.default_model) || '';
+  const aliased = (SNAP && SNAP.aliases && SNAP.aliases[def]) || def;
+  const target = MODELS.find(m => m.id === aliased || m.id.endsWith('/' + aliased));
+  if (target) sel.value = target.id;
+  calcCost();
+}
+function calcCost(){
+  const id = $('calcModel').value;
+  const m = MODELS.find(x => x.id === id);
+  const el = $('calcResult');
+  if (!m){ el.textContent = ''; return; }
+  const tin = Number($('calcIn').value || 0), tout = Number($('calcOut').value || 0);
+  const cost = (tin / 1e6) * (m.price_in || 0) + (tout / 1e6) * (m.price_out || 0);
+  const freeOut = (m.price_out === null || m.price_out === undefined);
+  el.textContent = `≈ $${cost.toFixed(6)}` + (freeOut ? '（输出免费）' : '');
+  el.style.color = cost === 0 ? 'var(--ok)' : 'var(--txt)';
+}
+async function refreshCatalog(){
+  toast('正在从各账号拉取…');
+  try{
+    const r = await api('/admin/api/catalog/refresh', {method:'POST', body:{}});
+    toast(`已更新 ${r.count} 个模型`);
+    await loadModels();
+  }catch(e){ toast(e.message,'bad'); }
+}
+
+/* ---------- 设置 ---------- */
+function renderSettings(){
+  const r = SNAP.router || {};
+  $('rStrategy').value = r.strategy || 'round_robin';
+  $('rRetries').value = r.max_retries ?? 3;
+  $('rRpm').value = r.rpm ?? 0;
+  $('rCool').value = r.cooldown_seconds ?? 60;
+  $('rCoolMax').value = r.max_cooldown_seconds ?? 900;
+  $('rTimeout').value = r.timeout ?? 120;
+  $('rDefault').value = r.default_model || '';
+  $('rUA').value = r.user_agent || '';
+  $('rDefaultNeu').value = r.default_daily_neurons ?? 10000;
+  $('rHealth').value = r.health_check_minutes ?? 60;
+  const al = SNAP.aliases || {};
+  $('aliasList').innerHTML = Object.keys(al).length
+    ? Object.entries(al).map(([k,v]) => `<div class="row" style="margin-bottom:6px">
+        <span class="chip">${esc(k)}</span><span class="muted">→</span>
+        <span class="mono">${esc(v)}</span><span class="spacer"></span>
+        <button class="danger" onclick="delAlias('${esc(k)}')">删除</button></div>`).join('')
+    : '<div class="muted">暂无别名</div>';
+}
+async function saveRouter(){
+  const body = {
+    strategy: $('rStrategy').value,
+    max_retries: $('rRetries').value,
+    rpm: $('rRpm').value,
+    cooldown_seconds: $('rCool').value,
+    max_cooldown_seconds: $('rCoolMax').value,
+    timeout: $('rTimeout').value,
+    default_model: $('rDefault').value.trim(),
+    user_agent: $('rUA').value.trim(),
+    default_daily_neurons: $('rDefaultNeu').value,
+    health_check_minutes: $('rHealth').value,
+  };
+  try{ await api('/admin/api/router', {method:'POST', body}); toast('设置已保存'); load(); }
+  catch(e){ toast(e.message,'bad'); }
+}
+async function addAlias(){
+  const name = $('alName').value.trim(), target = $('alTarget').value.trim();
+  if (!name || !target) return toast('别名和目标都要填','bad');
+  try{ await api('/admin/api/aliases', {method:'POST', body:{name, target}});
+       $('alName').value=''; $('alTarget').value=''; toast('已保存'); load(); }
+  catch(e){ toast(e.message,'bad'); }
+}
+async function delAlias(name){
+  try{ await api('/admin/api/aliases/'+encodeURIComponent(name), {method:'DELETE'}); toast('已删除'); load(); }
+  catch(e){ toast(e.message,'bad'); }
+}
+
+/* ---------- tab ---------- */
+function switchTab(name){
+  document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
+  ['overview','accounts','keys','models','settings'].forEach(n => {
+    $('tab-'+n).style.display = (n === name) ? '' : 'none';
+  });
+  if (name === 'models' && !MODELS.length) loadModels();
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+boot();
+setInterval(() => { if (KEY && !document.hidden) load(); }, 15000);
+</script>
+</body>
+</html>
