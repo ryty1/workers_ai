@@ -10,6 +10,8 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+_B64_IMG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+
 PORT = int(sys.argv[1])
 MODE = sys.argv[2]
 HITS = {"n": 0, "ua": ""}
@@ -21,6 +23,21 @@ class H(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+    def _send(self, obj, code=200):
+        raw = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def _send_raw(self, data: bytes, ctype: str, code: int = 200):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def do_GET(self):
         if self.path.startswith("/__ua"):
@@ -53,7 +70,11 @@ class H(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("Content-Length") or 0)
-        payload = json.loads(self.rfile.read(n) or b"{}")
+        body = self.rfile.read(n) if n else b""
+        try:
+            payload = json.loads(body or b"{}")
+        except Exception:
+            payload = {}          # multipart 之类解析不了，留给下面的分支按原始字节处理
         with LOCK:
             HITS["n"] += 1
             hits = HITS["n"]
@@ -71,6 +92,9 @@ class H(BaseHTTPRequestHandler):
 
         if MODE == "429":
             return fail(429, "rate limited")
+        if MODE == "quota":
+            return fail(429, "AiError: you have used up your daily free allocation "
+                              "of 10,000 neurons. Please upgrade to Workers Paid.")
         if MODE == "500":
             return fail(500, "boom")
         if MODE == "auth":
@@ -83,6 +107,22 @@ class H(BaseHTTPRequestHandler):
 
         if self.path.startswith("/ai/run/"):
             mid = self.path.rsplit("/", 1)[-1]
+            ctype = (self.headers.get("Content-Type") or "")
+            ok = {"success": True, "errors": [], "messages": []}
+            if "multipart/form-data" in ctype:
+                if b'name="audio"' in body:                 # 语音转写
+                    return self._send({"result": {"text": "mock transcript"}, **ok})
+                return self._send({"result": {"image": _B64_IMG}, **ok})
+            txt = payload.get("text")
+            if isinstance(txt, list):                       # 向量
+                return self._send({"result": {"data": [[0.1, 0.2, 0.3] for _ in txt],
+                                               "shape": [len(txt), 3]}, **ok})
+            if isinstance(txt, str):                        # 语音合成 → 二进制
+                return self._send_raw(b"ID3\x03\x00\x00\x00mock-mp3", "audio/mpeg")
+            if payload.get("prompt") and "image" in payload:   # 视觉问答
+                return self._send({"result": {"description": "mock vision answer"}, **ok})
+            if payload.get("prompt"):                       # 文生图
+                return self._send({"result": {"image": _B64_IMG}, **ok})
             answers = {qid: {"type": "noul", "noul": 0.9}
                        for qid in (payload.get("questions") or {})}
             raw = json.dumps({

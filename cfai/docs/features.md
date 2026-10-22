@@ -190,6 +190,86 @@ CF 免费额度是**每账号每天 10,000 Neurons**，网关默认就按这个�
 
 神经元用量取自响应头 `cf-ai-neurons`（CF 每个响应都带），比 body 里的 `usage.neurons` 更可靠，**流式请求也能算进去**。
 
+### 额度用尽 → 冻结 → 自动恢复
+
+账号当天额度用完后会被**冻结**，调度器直接跳过，不再浪费请求去打它：
+
+| 触发条件 | 动作 |
+|---|---|
+| 上游返回 429 且报文含 `used up your daily` / `daily free allocation` / `quota exceeded` | 冻结到下一个 UTC 零点 |
+| 本地累计神经元 ≥ `daily_neurons` | 冻结到下一个 UTC 零点（不等上游报错） |
+| 体检探测撞上 429 额度 | 同上 |
+| 到达 UTC 零点 | 自动解冻：清额度、清计数、清错误，重新进池 |
+
+**冻结 ≠ 冷却**：冷却只等几十秒（限流、5xx），冻结等一整天（额度）。两者分开存 `cooldown_until` / `quota_until`，不会互相覆盖。
+
+控制台账号卡上会显示「已冻结 · 12h20m 后自动恢复（UTC 00:00 重置）」，状态标签是黄色的「额度用尽」。点「重置」可以手动解冻，但额度其实没恢复，慎用。
+
+## 官方用量同步（可选）
+
+本地神经元数是按 `cf-ai-neurons` 响应头累加的，**网关只知道自己转发了多少**。要跟 Cloudflare 后台对账，用官方 GraphQL 分析接口：
+
+```bash
+cfai usage sync              # 拉今天（UTC）每个账号的真实用量
+cfai usage sync --date 2026-10-21
+cfai usage show              # 看上次同步结果
+```
+
+控制台「账号」页也有「同步官方用量」按钮。同步后会显示：官方神经元 / 本地神经元 / 差值 / 官方请求数 / 本地请求数，差值超过 5% 会标「偏差大」。
+
+**前提：token 要有 `Account Analytics : Read` 权限。**
+```
+Cloudflare 控制台 → 右上头像 → My Profile → API Tokens
+→ 编辑现有 token → + Add more → Account → Account Analytics → Read
+```
+
+Workers AI 的权限（`Workers AI : Read/Edit`）**不够**——它只能调推理，读不到分析数据，GraphQL 会返回 `authz` 错误。权限是叠加的，在原 token 上加一条即可，不用重新建。
+
+18 个账号就要改 18 次；漏掉的账号在 `cfai usage sync` 里会标「缺 Analytics 权限」，不影响正常调度。
+
+分析数据有 1–5 分钟延迟，刚发的请求可能还没算进去。
+
+### 一个 token 管两件事
+
+推理和读用量都用同一个 token，只是权限不同：
+
+```
+Workers AI : Read         ← 调模型
+Account Analytics : Read  ← 读用量（加上这条就行）
+```
+
+在控制台「添加账号」只填一个 API Token。它带 Analytics 权限就自动用官方计量（卡片标「官方」），没带就退回本地计数（标「本地」）。
+
+网关每 3 分钟自动同步一次（`router.usage_sync_seconds`，设 0 关闭）。计量优先用官方数据，超过 30 分钟没更新才退回本地计数；缺权限的账号 10 分钟内不会重复尝试，避免白打请求。
+
+### 健康判断改用用量同步
+
+以前靠定时「探测」判断账号是否可用（每个账号每小时打一次 clef-flash）。现在直接用用量同步代替：
+
+**能读到官方用量 = token 有效、权限正常 = 账号没问题。**
+
+同步成功会写 `checked_at` / `check_ok=true`，状态变「就绪」。探测式体检默认关闭（`router.health_check_minutes: 0`），少了一大堆噪音请求。
+
+**注意：同步成功不代表还有额度。** 额度用尽的账号照样能查用量，所以额度是独立判断的——`quota_until` 到期前一律显示「额度用尽」，即使 `check_ok=true`。
+
+没有 Analytics 权限的账号同步不了，状态会停在「未验证」，需要手动点「测试」或给它加权限。
+
+### 校准
+
+「账号」页每行的**校准**按钮 = 对这一个账号立刻拉一次官方用量，并把本地计数对齐（`neurons` / `requests` / `tokens` 全部写成官方值）。成功弹出官方数字和差值，失败弹出原因。
+
+后台每 3 分钟也会自动做同样的事（自动校准），所以本地计数不会长期漂移。表头按钮「同步官方用量」是给全部账号做一次。
+
+## 官方定价表
+
+```bash
+cfai pricing sync --diff     # 从官方定价页抓单价 + 神经元费率，并和本地对比
+cfai pricing show            # 看当前定价表
+cfai pricing show flux       # 只看某个模型
+```
+
+抓的是 `developers.cloudflare.com/workers-ai/platform/pricing/`，页面自带 `Last updated`，一起存进 `pricing.json`。按 token 计价的模型给 `$/M` 和「神经元/百万」，按单位计价的（图片按 tile/step、语音按分钟、TTS 按 1k 字符）给单位和单价。
+
 ## 出站 User-Agent
 
 默认发 `cfai/1.0`，可以在控制台「设置」里改全局值，或在账号编辑里单独覆盖（留空=继承全局）。

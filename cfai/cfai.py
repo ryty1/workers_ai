@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import collections
 import fnmatch
 import hashlib
 import json
@@ -23,14 +25,51 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.2.0"
+VERSION = "1.10.0"
 
 CF_ACCOUNT_CHAT = "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1/chat/completions"
 CF_ACCOUNT_MODELS = "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1/models"
+
+# ---- 模型分类 ----
+# Cloudflare 官方定价页明确列出：这些模型必须 Workers Paid 或 AI Gateway 预充值才能调
+PAID_ONLY_MODELS = {
+    "@cf/moonshotai/kimi-k2.6",
+    "@cf/moonshotai/kimi-k2.7-code",
+    "@cf/zai-org/glm-5.2",
+    "@cf/zai-org/glm-5.3",
+    "@cf/zai-org/glm-5.3-flash",
+    "@cf/deepseek-ai/deepseek-v4-flash-0731",
+    "@cf/deepseek-ai/deepseek-v4.1-flash-1017",
+    "@cf/deepseek-ai/deepseek-v4-pro-0813",
+}
+CAT_ORDER = ["paid", "free", "in_only", "both", "unit"]
+CAT_LABELS = {
+    "paid": "需付费订阅",
+    "free": "价格未知",
+    "in_only": "只收输入",
+    "both": "双向收费",
+    "unit": "按次计费",
+}
+
+
+def classify_model(mid: str, e: dict) -> str:
+    """把模型分成五类，用于控制台展示和筛选。"""
+    if mid in PAID_ONLY_MODELS:
+        return "paid"
+    pin, pout = e.get("price_in"), e.get("price_out")
+    other = e.get("price_other") or []
+    if pin is None and pout is None:
+        if not other or all((o.get("price") or 0) == 0 for o in other):
+            return "free"
+        return "unit"
+    if pin is not None and pout is None:
+        return "in_only"
+    return "both"
 
 DEFAULT_CONFIG = {
     "accounts": [],
@@ -46,8 +85,9 @@ DEFAULT_CONFIG = {
         "timeout": 120,
         "rpm": 0,                       # 每账号每分钟请求上限，0=不限（保护账号，避免触发限流）
         "default_daily_neurons": 10000, # 账号没单独设额度时按这个算（CF 免费额度 10000/天），0=不限
+        "usage_sync_seconds": 180,      # 每隔多久拉一次官方用量（0=不自动同步）
         "alias_only": True,             # 有别名时只对外暴露别名，原始模型 id 不列出也不接受调用
-        "health_check_minutes": 60,     # 后台自动体检间隔（分钟），0=关闭
+        "health_check_minutes": 0,      # 探测式体检间隔（分钟），0=关闭（改用官方用量同步判断健康）
         "user_agent": "cfai/1.0",       # 明确标识自己，不要伪装浏览器
         "default_model": "",
         "verbose": False,
@@ -121,6 +161,60 @@ def state_path() -> str:
     return os.path.join(home_dir(), "state.json")
 
 
+def log_path() -> str:
+    return os.path.join(home_dir(), "logs.jsonl")
+
+
+# ---- 调用日志：内存环形缓冲 + 追加到 logs.jsonl（超过 5MB 滚动）----
+LOG_MAX = 1000
+LOGS = collections.deque(maxlen=LOG_MAX)
+LOG_LOCK = threading.Lock()
+LOG_LOADED = {"done": False}
+
+
+def load_logs() -> None:
+    """启动时把最近 1000 条读进内存。"""
+    if LOG_LOADED["done"]:
+        return
+    LOG_LOADED["done"] = True
+    p = log_path()
+    if not os.path.exists(p):
+        return
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f.readlines()[-LOG_MAX:]:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    LOGS.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+
+
+def log_call(entry: dict) -> None:
+    """记一条调用记录。失败不影响主流程。"""
+    with LOG_LOCK:
+        LOGS.append(entry)
+        p = log_path()
+        try:
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            if os.path.exists(p) and os.path.getsize(p) > 5 * 1024 * 1024:
+                os.replace(p, p + ".1")
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except OSError:
+            pass
+
+
+def recent_logs(limit: int = 300) -> list:
+    with LOG_LOCK:
+        items = list(LOGS)
+    return items[-limit:][::-1]          # 新的在前
+
+
 def ensure_home() -> None:
     d = home_dir()
     os.makedirs(d, exist_ok=True)
@@ -133,6 +227,21 @@ def ensure_home() -> None:
 def today() -> str:
     """CF 免费额度按 UTC 零点重置，所以计数日也必须用 UTC，否则会和实际额度错 8 小时。"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def next_utc_midnight(ts=None) -> int:
+    """下一个 UTC 零点的时间戳——额度冻结到期点。"""
+    now = int(ts or time.time())
+    t = time.gmtime(now)
+    return now + (86400 - (t.tm_hour * 3600 + t.tm_min * 60 + t.tm_sec))
+
+
+def _quota_error(msg: str) -> bool:
+    """区分「今天额度用完了」和「只是瞬时限流」。"""
+    m = (msg or "").lower()
+    return ("used up your daily" in m or "daily free allocation" in m
+            or "quota exceeded" in m or "exceeded your" in m
+            or ("neurons" in m and "allocat" in m))
 
 
 # --------------------------------------------------------------------------- 配置
@@ -206,6 +315,7 @@ def new_account_state() -> dict:
         "cooldown_until": 0, "fail_streak": 0,
         "auth_error": False,
         "checked_at": 0, "check_ok": None,
+        "quota_until": 0, "quota_reason": "",
     }
 
 
@@ -249,7 +359,47 @@ def acc_state(st: dict, name: str) -> dict:
         base = new_account_state()
         base.update(st["accounts"][name])
         st["accounts"][name] = base
-    return st["accounts"][name]
+    s = st["accounts"][name]
+    _maybe_unfreeze(s)
+    return s
+
+
+def _maybe_unfreeze(s: dict) -> bool:
+    """冻结到期（UTC 零点）自动恢复：清额度、清计数、清错误。"""
+    qu = int(s.get("quota_until") or 0)
+    if not qu or time.time() < qu:
+        return False
+    for k in ("requests", "ok", "fail", "tokens_in", "tokens_out"):
+        s[k] = 0
+    s["neurons"] = 0.0
+    s["quota_until"] = 0
+    s["quota_reason"] = ""
+    s["last_error"] = ""
+    s["cooldown_until"] = 0
+    s["fail_streak"] = 0
+    s["checked_at"] = 0
+    s["check_ok"] = None
+    return True
+
+
+def _mark_quota(s: dict, msg: str = "") -> None:
+    """打上额度冻结标记（不落盘，调用方负责 save_state）。"""
+    s["quota_until"] = next_utc_midnight()
+    s["quota_reason"] = "今日神经元额度已用完（HTTP 429），UTC 00:00 自动恢复"
+    if msg:
+        s["last_error"] = f"额度用尽：{msg[:180]}"
+
+
+def freeze_account(st: dict, name: str, reason: str = "") -> int:
+    """额度用尽 → 冻结到下一个 UTC 零点，调度器直接跳过。返回解冻时间戳。"""
+    with STATE_LOCK:
+        s = acc_state(st, name)
+        until = next_utc_midnight()
+        s["quota_until"] = until
+        s["quota_reason"] = (reason or "今日额度用尽")[:200]
+        s["last_error"] = f"额度用尽，{time.strftime('%H:%M', time.gmtime(until))} UTC 后恢复"
+        save_state(st)
+        return until
 
 
 # --------------------------------------------------------------------------- 路由
@@ -369,6 +519,117 @@ def mark_dispatch(st: dict, name: str) -> None:
     s["recent"] = [t for t in (s.get("recent") or []) if now - t < 120] + [now]
 
 
+CF_API = "https://api.cloudflare.com/client/v4"
+
+USAGE_Q = """query($acc: String!, $d: Date) {
+  viewer { accounts(filter: {accountTag: $acc}) {
+    aiInferenceAdaptiveGroups(limit: 1000, filter: {date_geq: $d}, orderBy: [date_ASC]) {
+      count
+      sum { totalNeurons totalInputTokens totalOutputTokens }
+      dimensions { date modelId }
+    } } } }"""
+
+
+def _gql(tok: str, query: str, variables: dict, timeout: int = 30) -> dict:
+    body = json.dumps({"query": query, "variables": variables}).encode()
+    req = urllib.request.Request(CF_API + "/graphql", data=body, headers={
+        "Authorization": "Bearer " + tok,
+        "Content-Type": "application/json",
+        "User-Agent": "cfai/" + VERSION,
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def official_usage(acct: dict, day: str = None, timeout: int = 30) -> dict:
+    """查官方 GraphQL 分析，拿到这个账号当天真实消耗的神经元。
+
+    需要 token 带 Account Analytics : Read 权限，否则 CF 返回 authz 错误。
+    """
+    day = day or today()
+    if acct.get("type") != "cloudflare":
+        return {"ok": False, "error": "只有 cloudflare 类型账号支持同步官方用量"}
+    try:
+        r = _gql(acct.get("token", ""), USAGE_Q, {"acc": acct["account_id"], "d": day}, timeout)
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "error": f"HTTP {e.code}: {e.read()[:160].decode('utf-8', 'ignore')}"}
+    except Exception as e:
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"[:200]}
+
+    if r.get("errors"):
+        msg = str(((r.get("errors") or [{}])[0] or {}).get("message", ""))
+        if "not authorized" in msg.lower() or (r["errors"][0].get("extensions") or {}).get("code") == "authz":
+            return {"ok": False, "need_permission": True,
+                    "error": "token 缺少 Account Analytics : Read 权限"}
+        return {"ok": False, "error": msg[:200]}
+
+    groups = (((r.get("data") or {}).get("viewer") or {}).get("accounts") or [{}])[0] \
+        .get("aiInferenceAdaptiveGroups") or []
+    neu = tin = tout = 0.0
+    cnt = 0
+    by_model = {}
+    for g in groups:
+        if (g.get("dimensions") or {}).get("date") != day:
+            continue
+        s = g.get("sum") or {}
+        n = float(s.get("totalNeurons") or 0)
+        neu += n
+        tin += float(s.get("totalInputTokens") or 0)
+        tout += float(s.get("totalOutputTokens") or 0)
+        cnt += int(g.get("count") or 0)
+        mid = (g.get("dimensions") or {}).get("modelId") or "?"
+        by_model[mid] = round(by_model.get(mid, 0.0) + n, 2)
+    return {"ok": True, "date": day, "neurons": round(neu, 2), "requests": cnt,
+            "tin": int(tin), "tout": int(tout), "by_model": by_model,
+            "synced_at": int(time.time())}
+
+
+def sync_usage(cfg: dict, st: dict, names=None, day: str = None) -> list:
+    """逐账号同步官方用量，结果写进 state（官方值 vs 本地计数）。"""
+    day = day or today()
+    out = []
+    for a in cfg["accounts"]:
+        if names and a["name"] not in names:
+            continue
+        with STATE_LOCK:
+            prev = acc_state(st, a["name"]).get("official") or {}
+        # 缺权限的账号 10 分钟内不重复试，免得每轮都打一遍
+        if prev.get("need_permission") and time.time() - float(prev.get("synced_at") or 0) < 600:
+            out.append({"name": a["name"], **prev,
+                        "local_neurons": round(float(prev.get("local_neurons", 0)), 2),
+                        "local_requests": 0})
+            continue
+        u = official_usage(a, day)
+        with STATE_LOCK:
+            s = acc_state(st, a["name"])
+            s["official"] = u
+            if u.get("ok"):                      # 自动校准：本地计数对齐官方
+                # 能读到官方用量 = token 有效、权限正常，等价于一次健康检查。
+                # 但注意：这不代表还有额度（额度用尽的账号照样能查用量）。
+                s["checked_at"] = int(time.time())
+                s["check_ok"] = True
+                s["auth_error"] = False
+                s["fail_streak"] = 0
+                if not s.get("quota_until"):
+                    s["cooldown_until"] = 0
+                    s["last_error"] = ""
+                s["neurons"] = round(float(u.get("neurons") or 0), 4)
+                s["requests"] = int(u.get("requests") or 0)
+                s["tokens_in"] = int(u.get("tin") or 0)
+                s["tokens_out"] = int(u.get("tout") or 0)
+                s["calibrated_at"] = int(time.time())
+            cap = daily_budget(cfg, a)
+            if u.get("ok") and cap and float(u.get("neurons") or 0) >= cap:
+                s["quota_until"] = next_utc_midnight()
+                s["quota_reason"] = f"官方用量 {float(u['neurons']):.0f}/{cap:.0f} 已超额度"
+                s["last_error"] = "额度用尽（官方用量核对）"
+            save_state(st)
+        out.append({"name": a["name"], **u,
+                    "local_neurons": round(float(s.get("neurons", 0)), 2),
+                    "local_requests": s.get("requests", 0)})
+    return out
+
+
 def daily_budget(cfg: dict, acct: dict) -> float:
     """账号的每日神经元额度：优先账号自定义，否则用全局默认（CF 免费 10000/天）。0=不限。"""
     v = acct.get("daily_neurons")
@@ -395,13 +656,24 @@ def _order_candidates(cfg: dict, st: dict, model: str) -> list:
         s = acc_state(st, a["name"])
         if s.get("auth_error"):
             continue
+        if int(s.get("quota_until") or 0) > now:      # 额度用尽已冻结
+            continue
         if s.get("cooldown_until", 0) > now:
             continue
         cap = a.get("daily_requests")
         if cap and s.get("requests", 0) >= int(cap):
             continue
         ncap = daily_budget(cfg, a)
+        off = official_of(s)
+        if ncap and off and float(off.get("neurons") or 0) >= ncap:
+            if not s.get("quota_until"):             # 官方用量为准，直接冻
+                s["quota_until"] = next_utc_midnight()
+                s["quota_reason"] = f"官方用量 {float(off['neurons']):.0f}/{ncap:.0f} 已超额度"
+            continue
         if ncap and float(s.get("neurons", 0)) >= ncap:
+            if not s.get("quota_until"):             # 顺手冻上，UI 立刻能看到
+                s["quota_until"] = next_utc_midnight()
+                s["quota_reason"] = f"今日神经元已用 {float(s['neurons']):.0f}/{ncap:.0f}"
             continue
         rpm = a.get("rpm") or cfg["router"].get("rpm") or 0
         if rpm and _recent_count(s) >= int(rpm):
@@ -569,6 +841,12 @@ def _record_failure(st: dict, cfg: dict, name: str, code: int, msg: str, retry_a
         s["auth_error"] = True
         s["cooldown_until"] = int(time.time()) + cap
     elif kind == "rate":
+        if _quota_error(msg):                     # 不是限流，是今天真的用完了
+            s["quota_until"] = next_utc_midnight()
+            s["quota_reason"] = msg[:200]
+            s["cooldown_until"] = 0
+            s["last_error"] = f"额度用尽，{time.strftime('%H:%M', time.gmtime(s['quota_until']))} UTC 后恢复"
+            return
         wait = base
         if retry_after:
             try:
@@ -710,8 +988,13 @@ def run_url(acct: dict, model_id: str) -> str:
     return f"{base}/ai/run/{model_id}"
 
 
-def decide_call(cfg: dict, st: dict, model_id: str, body: dict, timeout=None):
-    """在账号池里跑一次原生 run 请求，同样的轮询/冷却/故障转移。"""
+def run_call(cfg: dict, st: dict, model_id: str, body: dict, timeout=None,
+             raw: bytes = None, ctype: str = None, raw_out: bool = False):
+    """在账号池里跑一次原生 run 请求，同样的轮询/冷却/故障转移。
+
+    raw/ctype 用于需要 multipart 的模型（flux-2 系列），给了 raw 就直接发原始字节。
+    raw_out=True 时上游返回的是二进制（TTS 音频），直接回 (200, (bytes, ctype), 账号)。
+    """
     if not model_allowed(cfg, model_id):
         return 403, _err_body(f"模型未启用: {model_id}", 403), None
     cands = order_candidates(cfg, st, model_id)
@@ -729,18 +1012,23 @@ def decide_call(cfg: dict, st: dict, model_id: str, body: dict, timeout=None):
             headers = {"Authorization": "Bearer " + acct["token"]}
         else:
             headers = {"Authorization": "Bearer " + acct.get("api_key", "")}
-        headers["Content-Type"] = "application/json"
+        headers["Content-Type"] = ctype or "application/json"
         ua = acct.get("user_agent") or cfg["router"].get("user_agent")
         if ua:
             headers["User-Agent"] = ua
         mark_dispatch(st, acct["name"])
         try:
-            req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+            payload_bytes = raw if raw is not None else json.dumps(body).encode("utf-8")
+            req = urllib.request.Request(url, data=payload_bytes,
                                          headers=headers, method="POST")
             with urllib.request.urlopen(req, timeout=timeout or cfg["router"].get("timeout", 120)) as r:
                 nh = _neurons_header(r)
-                raw = r.read()
-            data = json.loads(raw)
+                resp_raw = r.read()
+                resp_ctype = r.headers.get("Content-Type", "")
+            if raw_out:
+                record_success(st, acct["name"], {"usage": {"neurons": nh or 0}}, nh)
+                return 200, (resp_raw, resp_ctype), acct["name"]
+            data = json.loads(resp_raw)
             if isinstance(data, dict) and data.get("success") is False:
                 err = (data.get("errors") or [{}])[0].get("message", "unknown error")
                 record_failure(st, cfg, acct["name"], 400, err)
@@ -763,6 +1051,151 @@ def decide_call(cfg: dict, st: dict, model_id: str, body: dict, timeout=None):
             record_failure(st, cfg, acct["name"], 0, str(e))
             errors.append({"account": acct["name"], "code": 0, "msg": str(e)[:200]})
     return 502, _err_body("所有账号均失败: " + json.dumps(errors, ensure_ascii=False)[:800], 502), None
+
+
+# ---- 图像生成 ----
+# flux-2 系列在 REST 上只接受 multipart/form-data，其它文生图模型接受 JSON
+MULTIPART_HINTS = ("flux-2", "klein")
+DEFAULT_IMAGE_MODEL = "@cf/black-forest-labs/flux-2-dev"
+
+
+def _wants_multipart(model_id: str) -> bool:
+    m = model_id.lower()
+    return any(h in m for h in MULTIPART_HINTS)
+
+
+def _multipart_body(fields: dict, boundary: str) -> bytes:
+    parts = []
+    for k, v in fields.items():
+        if v is None or v == "":
+            continue
+        parts.append(("--%s\r\n" % boundary).encode())
+        parts.append(('Content-Disposition: form-data; name="%s"\r\n\r\n' % k).encode())
+        parts.append(str(v).encode("utf-8"))
+        parts.append(b"\r\n")
+    parts.append(("--%s--\r\n" % boundary).encode())
+    return b"".join(parts)
+
+
+def _parse_multipart(body: bytes, boundary: str) -> dict:
+    """极简 multipart/form-data 解析：{字段名: bytes}。够用即可，不处理嵌套。"""
+    out = {}
+    if not boundary:
+        return out
+    delim = b"--" + boundary.encode()
+    for part in body.split(delim):
+        if not part.strip() or part.strip() == b"--":
+            continue
+        head, sep, data = part.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        m = re.search(rb'name="([^"]+)"', head)
+        if not m:
+            continue
+        out[m.group(1).decode()] = data[:-2] if data.endswith(b"\r\n") else data
+    return out
+
+
+def _boundary_of(ctype: str) -> str:
+    m = re.search(r'boundary="?([^";]+)"?', ctype or "")
+    return m.group(1) if m else ""
+
+
+def _estimate_tokens(text) -> int:
+    s = text if isinstance(text, str) else "".join(map(str, text or []))
+    return max(1, len(s) // 4)
+
+
+def _load_image_bytes(url: str) -> bytes:
+    """data: URL 直接解；http(s) 就下载（限制 8MB）。"""
+    if not url:
+        return b""
+    if url.startswith("data:"):
+        _, _, b64 = url.partition(",")
+        try:
+            return base64.b64decode(b64)
+        except Exception:
+            return b""
+    if url.startswith(("http://", "https://")):
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "cfai/1.3"})
+            with urllib.request.urlopen(req, timeout=20) as r:
+                return r.read(8 * 1024 * 1024)
+        except Exception:
+            return b""
+    return b""
+
+
+def split_content(payload: dict):
+    """从 OpenAI messages 里拆出纯文本和图片，用于视觉模型。"""
+    texts, images = [], []
+    for m in payload.get("messages") or []:
+        c = m.get("content")
+        if isinstance(c, str):
+            texts.append(c)
+        elif isinstance(c, list):
+            for part in c:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "text":
+                    texts.append(part.get("text") or "")
+                elif part.get("type") == "image_url":
+                    b = _load_image_bytes((part.get("image_url") or {}).get("url") or "")
+                    if b:
+                        images.append(b)
+    return "\n".join(t for t in texts if t), images
+
+
+def route_for_model(mid: str, task: str) -> str:
+    """这个模型走哪个接口——控制台里展示用。"""
+    t = (task or "").lower()
+    if "clef" in mid.lower():
+        return "/v1/decide"
+    if "text generation" in t:
+        return "/v1/chat/completions"
+    if "text-to-image" in t:
+        return "/v1/images/generations"
+    if "image-to-text" in t:
+        return "/v1/chat/completions"      # 带 image_url 的视觉请求
+    if "embedding" in t:
+        return "/v1/embeddings"
+    if "speech recognition" in t:
+        return "/v1/audio/transcriptions"
+    if "text-to-speech" in t:
+        return "/v1/audio/speech"
+    return "/v1/run"          # 视觉问答 / 分类 / 重排 / 翻译 等
+
+
+def _sniff_image_mime(b64: str) -> str:
+    """从 base64 头几个字节猜 mime（CF 的图像模型有的返回 JPEG 有的返回 PNG）。"""
+    try:
+        import base64 as _b64
+        head = _b64.b64decode(b64[:64])
+    except Exception:
+        return "image/png"
+    if head[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    return "image/png"
+
+
+def _extract_image(data) -> str:
+    """CF 返回 {"result":{"image":"<base64>"}}，个别模型返回数组。"""
+    if not isinstance(data, dict):
+        return ""
+    res = data.get("result")
+    if isinstance(res, dict):
+        img = res.get("image")
+        if isinstance(img, str):
+            return img
+        if isinstance(img, list) and img and isinstance(img[0], str):
+            return img[0]
+    if isinstance(res, str) and len(res) > 256:
+        return res
+    return ""
 
 
 def _data_url(path: str) -> str:
@@ -833,7 +1266,7 @@ def cmd_decide(args) -> int:
     if args.image:
         body["images"] = [_data_url(p) for p in args.image]
 
-    status, data, acct = decide_call(cfg, st, model_id, body)
+    status, data, acct = run_call(cfg, st, model_id, body)
     save_state(st)
     if status != 200:
         print(json.dumps(data, ensure_ascii=False), file=sys.stderr)
@@ -974,33 +1407,71 @@ def _post_json(url: str, headers: dict, body: dict, timeout: int = 30):
         return json.loads(r.read())
 
 
+def _post_raw(url: str, headers: dict, body: bytes, ctype: str, timeout: int = 60):
+    h = dict(headers)
+    h["Content-Type"] = ctype
+    req = urllib.request.Request(url, data=body, headers=h, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
 def _probe(cfg: dict, acct: dict, model: str):
-    """按模型类型选探测方式：聊天 / clef 决策 / embedding。返回 (ok, err)。"""
+    """按模型类型选探测方式。返回 (ok, err)；ok=None 表示这种模型没法探，调用方应跳过。"""
     model = (cfg.get("aliases") or {}).get(model, model)
     mid = model.lower()
     cat = (load_catalog().get("models") or {}).get(model) or {}
     task = (cat.get("task") or "").lower()
+    hdrs = _acct_headers(cfg, acct)
+    url = run_url(acct, model)
 
     if "clef" in mid:
         body = {"model": model.rsplit("/", 1)[-1],
                 "state": "connectivity probe",
                 "questions": {"ok": {"type": "noul", "instructions": "Is this a probe?"}}}
-        data = _post_json(run_url(acct, model), _acct_headers(cfg, acct), body)
+        data = _post_json(url, hdrs, body)
         if isinstance(data, dict) and data.get("success") is False:
             return False, str((data.get("errors") or [{}])[0].get("message", ""))[:200]
         return True, ""
 
     if "embedding" in task or "/bge-" in mid or "embed" in mid:
-        data = _post_json(run_url(acct, model), _acct_headers(cfg, acct), {"text": ["ping"]})
+        data = _post_json(url, hdrs, {"text": ["ping"]})
         if isinstance(data, dict) and data.get("success") is False:
             return False, str((data.get("errors") or [{}])[0].get("message", ""))[:200]
         return True, ""
 
-    # 默认按聊天模型探测
-    payload = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 1}
-    url, headers, body = build_request(cfg, acct, payload)
-    _post_json(url, headers, body)
-    return True, ""
+    if "text-to-image" in task or "flux" in mid or "stable-diffusion" in mid \
+            or "dreamshaper" in mid:
+        fields = {"prompt": "a small red dot"}
+        if _wants_multipart(model):
+            b = "----probe" + secrets.token_hex(6)
+            data = _post_raw(url, hdrs, _multipart_body(fields, b),
+                             "multipart/form-data; boundary=" + b)
+        else:
+            data = _post_json(url, hdrs, fields)
+        if isinstance(data, dict) and data.get("success") is False:
+            return False, str((data.get("errors") or [{}])[0].get("message", ""))[:200]
+        return True, ""
+
+    if "text-to-speech" in task:
+        data = _post_raw(url, hdrs, json.dumps({"text": "ping"}).encode(), "application/json")
+        return True, ""          # 音频流也可能走到这里，能解析就说明通了
+
+    if "text classification" in task:
+        body = {"query": "ping", "contexts": [{"text": "ping"}]}
+        data = _post_json(url, hdrs, body)
+        if isinstance(data, dict) and data.get("success") is False:
+            return False, str((data.get("errors") or [{}])[0].get("message", ""))[:200]
+        return True, ""
+
+    if "text generation" in task or not task:
+        payload = {"model": model, "messages": [{"role": "user", "content": "ping"}],
+                   "max_tokens": 1}
+        u, h, body = build_request(cfg, acct, payload)
+        _post_json(u, h, body)
+        return True, ""
+
+    # 语音识别 / 图像分类 / dumb pipe：没有轻量探测方式，跳过而不是判死
+    return None, "该模型类型暂不支持连通性探测"
 
 
 def _health_check_all(cfg: dict = None) -> dict:
@@ -1008,12 +1479,15 @@ def _health_check_all(cfg: dict = None) -> dict:
     cfg = cfg or load_config()
     st = Handler.state or load_state()
     model = _pick_test_model(cfg)
-    ok_n = 0
+    ok_n = skipped = 0
     for a in cfg["accounts"]:
         try:
             ok, ms, used, err = _test_one(cfg, a, model)
         except Exception as e:
             ok, ms, used, err = False, 0, model, str(e)[:200]
+        if ok is None:                       # 这个模型类型探不了，别动账号状态
+            skipped += 1
+            continue
         with STATE_LOCK:
             s = acc_state(st, a["name"])
             s["checked_at"] = int(time.time())
@@ -1028,18 +1502,30 @@ def _health_check_all(cfg: dict = None) -> dict:
                 s["last_error"] = err
                 if "401" in err or "403" in err:
                     s["auth_error"] = True
+                if _quota_error(err):                 # 探测就撞到额度用尽，直接冻结
+                    _mark_quota(s, err)
             save_state(st)
-    return {"checked": len(cfg["accounts"]), "ok": ok_n, "model": model}
+    return {"checked": len(cfg["accounts"]), "ok": ok_n, "skipped": skipped, "model": model}
 
 
 def _pick_test_model(cfg: dict) -> str:
-    """测试用的模型：优先白名单第一个（探测方式会按模型类型自动适配）。"""
-    allow = allowed_models(cfg)
-    if allow:
-        return (cfg.get("aliases") or {}).get(allow[0], allow[0])
+    """体检用的模型：优先聊天模型（便宜、快，不会因为入参格式问题误报）。"""
+    aliases = cfg.get("aliases") or {}
+    cat = load_catalog().get("models") or {}
+
+    def task_of(m):
+        return ((cat.get(m) or {}).get("task") or "").lower()
+
+    cands = [aliases.get(m, m) for m in allowed_models(cfg)]
+    for m in cands:                                  # 先找能聊天的
+        if "clef" not in m.lower() and "text generation" in task_of(m):
+            return m
+    for m in cands:                                  # 再退到决策模型
+        if "clef" in m.lower():
+            return m
     dm = cfg["router"].get("default_model") or ""
-    dm_res = (cfg.get("aliases") or {}).get(dm, dm)
-    return dm_res or "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    dm = aliases.get(dm, dm)
+    return dm or "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
 
 
 def _test_one(cfg, acct, model=None):
@@ -1076,18 +1562,20 @@ def cmd_account_test(args) -> int:
         ok, ms, model, err = _test_one(cfg, a, args.model)
         results.append({"account": a["name"], "ok": ok, "ms": ms, "model": model, "error": err})
         s = acc_state(st, a["name"])
-        if ok:
+        if ok is True:
             s["auth_error"] = False
             s["cooldown_until"] = 0
             s["fail_streak"] = 0
             s["last_error"] = ""
-        else:
+        elif ok is False:
             bad += 1
             s["last_error"] = err
             if "401" in err or "403" in err:
                 s["auth_error"] = True
+            if _quota_error(err):
+                _mark_quota(s, err)
         if not args.json:
-            mark = "OK  " if ok else "FAIL"
+            mark = "SKIP" if ok is None else ("OK  " if ok else "FAIL")
             print(f"[{mark}] {a['name']:<18} {ms:>5}ms  {model}" + (f"  <- {err}" if err else ""))
     save_state(st)
     if args.json:
@@ -1258,7 +1746,60 @@ def load_catalog() -> dict:
         return {"fetched_at": 0, "models": {}}
     cat.setdefault("fetched_at", 0)
     cat.setdefault("models", {})
+    _apply_pricing(cat)
     return cat
+
+
+def pricing_path() -> str:
+    return os.path.join(home_dir(), "pricing.json")
+
+
+_PRICING_CACHE = {"mtime": 0, "data": {}}
+
+
+def load_pricing() -> dict:
+    """官方定价表（tools/sync_pricing.py 生成），按 mtime 缓存。"""
+    p = pricing_path()
+    try:
+        mt = os.path.getmtime(p)
+    except OSError:
+        return {}
+    if _PRICING_CACHE["mtime"] != mt:
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                _PRICING_CACHE["data"] = json.load(f)
+            _PRICING_CACHE["mtime"] = mt
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return _PRICING_CACHE["data"]
+
+
+def _apply_pricing(cat: dict) -> None:
+    """把官方定价覆盖到 catalog 上：单价、按单位计价、神经元费率。"""
+    pr = load_pricing()
+    if not pr:
+        return
+    cat["pricing_doc_updated"] = pr.get("doc_updated", "")
+    cat["pricing_fetched_at"] = pr.get("fetched_at", 0)
+    table = pr.get("models") or {}
+    for mid, e in (cat.get("models") or {}).items():
+        p = table.get(mid)
+        if not p:
+            continue
+        price, neurons = p.get("price") or {}, p.get("neurons") or {}
+        for k, f in (("in", "price_in"), ("out", "price_out"), ("cached", "price_cached")):
+            if price.get(k) is not None:
+                e[f] = price[k]
+        for k, f in (("in", "neurons_in"), ("out", "neurons_out"), ("cached", "neurons_cached")):
+            if neurons.get(k) is not None:
+                e[f] = neurons[k]
+        unit = p.get("price_unit") or {}
+        nunit = p.get("neurons_unit") or {}
+        if unit or nunit:
+            e["price_other"] = [{"unit": u, "price": v, "neurons": nunit.get(u)}
+                                for u, v in unit.items()]
+            e["neurons_other"] = nunit
+        e["price_source"] = "docs"
 
 
 def save_catalog(cat: dict) -> None:
@@ -1533,6 +2074,73 @@ def cmd_alias(args) -> int:
     return 0
 
 
+def cmd_usage(args) -> int:
+    cfg = load_config()
+    st = load_state()
+    names = [args.account] if getattr(args, "account", None) else None
+    if getattr(args, "action", "show") == "sync":
+        res = sync_usage(cfg, st, names, getattr(args, "date", None))
+    else:
+        res = []
+        for a in cfg["accounts"]:
+            if names and a["name"] not in names:
+                continue
+            s = acc_state(st, a["name"])
+            o = s.get("official") or {}
+            res.append({"name": a["name"], **o,
+                        "local_neurons": round(float(s.get("neurons", 0)), 2),
+                        "local_requests": s.get("requests", 0)})
+
+    if getattr(args, "json", False):
+        print(json.dumps(res, ensure_ascii=False, indent=2))
+        return 0
+
+    print(f"{'账号':<16}{'官方神经元':>12}{'本地神经元':>12}{'差':>10}{'官方请求':>10}{'本地请求':>10}")
+    ok_n = 0
+    for r in res:
+        if not r.get("ok"):
+            why = "缺 Analytics 权限" if r.get("need_permission") else (r.get("error") or "")[:28]
+            print(f"{r['name']:<16}{'-':>12}{r.get('local_neurons', 0):>12}{'-':>10}"
+                  f"{'-':>10}{r.get('local_requests', 0):>10}   {why}")
+            continue
+        ok_n += 1
+        diff = round(r["neurons"] - r.get("local_neurons", 0), 2)
+        flag = "" if abs(diff) < max(1.0, r["neurons"] * 0.05) else "  ← 偏差大"
+        print(f"{r['name']:<16}{r['neurons']:>12}{r.get('local_neurons', 0):>12}{diff:>+10}"
+              f"{r['requests']:>10}{r.get('local_requests', 0):>10}{flag}")
+    print(f"\n{ok_n}/{len(res)} 个账号同步成功" + ("" if ok_n else "（token 需要 Account Analytics : Read 权限）"))
+    return 0 if ok_n or not res else 1
+
+
+def cmd_pricing(args) -> int:
+    if getattr(args, "action", "show") == "sync":
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tools", "sync_pricing.py")
+        if not os.path.exists(script):
+            print("找不到 tools/sync_pricing.py", file=sys.stderr)
+            return 1
+        return subprocess.call([sys.executable, script] + (["--diff"] if args.diff else []))
+
+    pr = load_pricing()
+    if not pr:
+        print("还没有官方定价表，先跑：cfai pricing sync")
+        return 1
+    print(f"官方页最后更新: {pr.get('doc_updated', '?')}")
+    print(f"抓取时间: {time.strftime('%Y-%m-%d %H:%M', time.localtime(pr.get('fetched_at', 0)))}")
+    print(f"模型数: {len(pr.get('models') or {})}")
+    q = (args.model or "").lower()
+    for mid, v in sorted((pr.get("models") or {}).items()):
+        if q and q not in mid.lower():
+            continue
+        p, n = v.get("price") or {}, v.get("neurons") or {}
+        tok = "  ".join(f"{k} ${p[k]}/M" for k in ("in", "out", "cached") if k in p)
+        neu = "  ".join(f"{k} {n[k]:.0f}" for k in ("in", "out", "cached") if k in n)
+        units = "  ".join(f"{u} ${c}" for u, c in (v.get("price_unit") or {}).items())
+        print(f"{mid:<46}{tok or units}")
+        if neu:
+            print(f"{'':<46}神经元/百万: {neu}")
+    return 0
+
+
 def cmd_stats(args) -> int:
     cfg = load_config()
     st = load_state()
@@ -1633,6 +2241,19 @@ def _hourly_series(st: dict, hours: int = 24) -> list:
     return out
 
 
+def official_of(s: dict, day: str = None, max_age: int = 1800) -> dict:
+    """取当天、且足够新的官方用量；没有就返回空 dict（调用方退回本地计数）。"""
+    o = s.get("official") or {}
+    if not o.get("ok"):
+        return {}
+    if o.get("date") != (day or today()):
+        return {}
+    age = time.time() - float(o.get("synced_at") or 0)
+    if max_age and age > max_age:
+        return {}
+    return o
+
+
 def admin_snapshot(cfg: dict, st: dict) -> dict:
     now = time.time()
     accounts = []
@@ -1640,6 +2261,8 @@ def admin_snapshot(cfg: dict, st: dict) -> dict:
         s = acc_state(st, a["name"])
         if s.get("auth_error"):
             status = "auth_error"
+        elif int(s.get("quota_until") or 0) > now:
+            status = "quota"
         elif s.get("cooldown_until", 0) > now:
             status = "cooling"
         elif not s.get("checked_at"):
@@ -1650,26 +2273,34 @@ def admin_snapshot(cfg: dict, st: dict) -> dict:
             status = "ready"
         budget = daily_budget(cfg, a) or None
         is_default = bool(budget) and not a.get("daily_neurons")
-        used = float(s.get("neurons", 0))
+        off = official_of(s)
+        used = float(off["neurons"]) if off else float(s.get("neurons", 0))
         accounts.append({
             "name": a["name"],
             "type": a["type"],
             "status": status,
             "cooldown_left": max(0, int(s.get("cooldown_until", 0) - now)),
-            "requests": s.get("requests", 0),
+            "quota_left": max(0, int(int(s.get("quota_until") or 0) - now)),
+            "quota_reason": s.get("quota_reason", ""),
+            "requests": int(off.get("requests") or 0) if off else s.get("requests", 0),
             "ok": s.get("ok", 0),
             "fail": s.get("fail", 0),
             "neurons": round(used, 2),
+            "neurons_local": round(float(s.get("neurons", 0)), 2),
+            "neurons_source": "official" if off else "local",
+            "official_at": int(off.get("synced_at") or 0),
+            "calibrated_at": int(s.get("calibrated_at") or 0),
             "budget": budget,
             "budget_is_default": is_default,
             "remaining": round(max(0.0, float(budget) - used), 2) if budget else None,
-            "tokens_in": s.get("tokens_in", 0),
-            "tokens_out": s.get("tokens_out", 0),
+            "tokens_in": int(off.get("tin") or 0) if off else s.get("tokens_in", 0),
+            "tokens_out": int(off.get("tout") or 0) if off else s.get("tokens_out", 0),
             "last_used": s.get("last_used", 0),
             "last_error": s.get("last_error", ""),
             "checked_at": s.get("checked_at", 0),
             "check_ok": s.get("check_ok"),
             "bad_models": s.get("bad_models") or [],
+            "official": s.get("official") or {},
             "models": a.get("models") or [],
             "daily_requests": a.get("daily_requests"),
             "rpm": a.get("rpm"),
@@ -1715,6 +2346,9 @@ def admin_snapshot(cfg: dict, st: dict) -> dict:
             "accounts": len(accounts),
             "ready": sum(1 for x in accounts if x["status"] == "ready"),
             "requests": sum(x["requests"] for x in accounts),
+            "gateway_requests": sum(int(x["ok"]) + int(x["fail"]) for x in accounts),
+            "requests_source": ("official" if any(x["neurons_source"] == "official"
+                                                 for x in accounts) else "local"),
             "ok": sum(x["ok"] for x in accounts),
             "fail": sum(x["fail"] for x in accounts),
             "neurons": round(sum(x["neurons"] for x in accounts), 2),
@@ -1852,7 +2486,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
+    def _mark(self, model=None, account=None):
+        info = getattr(self, "_loginfo", None)
+        if info is None:
+            return
+        if model:
+            info["model"] = model
+        if account:
+            info["account"] = account
+
+    def _log_req(self, code: int, obj):
+        """把一次 /v1 调用写进日志（每个请求只记一次）。"""
+        info = getattr(self, "_loginfo", None)
+        if not info:
+            return
+        self._loginfo = None
+        ip = (self.headers.get("X-Forwarded-For") or "") or self.client_address[0]
+        entry = {
+            "ts": int(time.time()),
+            "path": info.get("path", ""),
+            "model": info.get("model", ""),
+            "account": info.get("account", ""),
+            "key": info.get("key", ""),
+            "status": code,
+            "ms": int((time.time() - info.get("t0", time.time())) * 1000),
+            "ip": ip.split(",")[0].strip(),
+        }
+        if code != 200 and isinstance(obj, dict):
+            err = obj.get("error") or {}
+            entry["error"] = str(err.get("message", ""))[:200]
+        log_call(entry)
+
     def _json(self, code: int, obj):
+        self._log_req(code, obj)
         raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1968,6 +2634,36 @@ class Handler(BaseHTTPRequestHandler):
                 if left <= 0:
                     return self._json(401, _err_body("会话已失效", 401))
                 return self._json(200, {"ok": True, "expires_in": int(left)})
+            if path == "/admin/api/usage":
+                cfg = Handler.cfg or load_config()
+                st = Handler.state or load_state()
+                rows = []
+                for a in cfg["accounts"]:
+                    s = acc_state(st, a["name"])
+                    o = s.get("official") or {}
+                    rows.append({"name": a["name"], **o,
+                                 "local_neurons": round(float(s.get("neurons", 0)), 2),
+                                 "local_requests": s.get("requests", 0)})
+                return self._json(200, {"accounts": rows})
+            if path == "/admin/api/logs":
+                load_logs()
+                qs = self.path.split("?", 1)[1] if "?" in self.path else ""
+                params = dict(kv.split("=", 1) for kv in qs.split("&") if "=" in kv)
+                q = urllib.parse.unquote_plus(params.get("q", "")).lower()
+                stf = params.get("status", "")
+                try:
+                    limit = max(1, min(1000, int(params.get("limit", "300"))))
+                except ValueError:
+                    limit = 300
+                items = recent_logs(1000)
+                if q:
+                    items = [x for x in items if q in
+                             f"{x.get('model','')}{x.get('path','')}{x.get('account','')}{x.get('key','')}".lower()]
+                if stf == "ok":
+                    items = [x for x in items if x.get("status") == 200]
+                elif stf == "bad":
+                    items = [x for x in items if x.get("status") != 200]
+                return self._json(200, {"logs": items[:limit], "total": len(items)})
             if path == "/admin/api/models":
                 cat = load_catalog()
                 allow = allowed_models(cfg)
@@ -1982,11 +2678,14 @@ class Handler(BaseHTTPRequestHandler):
                 rows = [{"id": mid, "task": e.get("task", ""), "context": e.get("context"),
                          "price_in": e.get("price_in"), "price_out": e.get("price_out"),
                          "price_cached": e.get("price_cached"),
+                         "price_other": e.get("price_other") or [],
+                         "cat": classify_model(mid, e),
+                         "route": route_for_model(mid, e.get("task", "")),
                          "allowed": (not allow) or mid in allow_set or mid in resolved_allow,
                          "accounts": len(e.get("accounts") or [])}
                         for mid, e in (cat.get("models") or {}).items()
                         if not q or q in mid.lower() or q in (e.get("task") or "").lower()]
-                rows.sort(key=lambda r: r["id"])
+                rows.sort(key=lambda r: (CAT_ORDER.index(r["cat"]), r["id"]))
                 return self._json(200, {"fetched_at": cat.get("fetched_at", 0),
                                         "allowed_models": allow, "models": rows})
         return self._json(404, _err_body("not found", 404))
@@ -2052,6 +2751,35 @@ class Handler(BaseHTTPRequestHandler):
 
         if not self._admin_ok():
             return self._json(401, _err_body("invalid api key", 401))
+        if len(tail) == 3 and tail[0] == "accounts" and tail[2] in ("sync", "calibrate"):
+            name = tail[1]
+            cfg0 = load_config()
+            st0 = Handler.state or load_state()
+            if not get_account(cfg0, name):
+                return self._json(404, _err_body("账号不存在", 404))
+            with STATE_LOCK:
+                prev = float(acc_state(st0, name).get("neurons", 0))
+            res = sync_usage(cfg0, st0, [name], None)
+            row = res[0] if res else {"ok": False, "error": "同步失败"}
+            if row.get("ok"):
+                return self._json(200, {"ok": True, "prev_neurons": prev,
+                                        "official": {"neurons": row["neurons"],
+                                                     "requests": row["requests"],
+                                                     "date": row["date"],
+                                                     "tin": row.get("tin", 0),
+                                                     "tout": row.get("tout", 0)}})
+            return self._json(200, {"ok": False,
+                                    "need_permission": bool(row.get("need_permission")),
+                                    "error": row.get("error") or "未知错误"})
+
+        if tail == ["usage", "sync"]:
+            cfg0 = load_config()
+            st0 = Handler.state or load_state()
+            res = sync_usage(cfg0, st0, None, d.get("date"))
+            okn = sum(1 for r in res if r.get("ok"))
+            need = sum(1 for r in res if r.get("need_permission"))
+            return self._json(200, {"ok": okn > 0, "synced": okn, "total": len(res),
+                                    "need_permission": need, "results": res})
         cfg = load_config()
         with STATE_LOCK:
             st = Handler.state or load_state()
@@ -2068,12 +2796,13 @@ class Handler(BaseHTTPRequestHandler):
                     s = acc_state(st, res["name"])
                     s["checked_at"] = int(time.time())
                     s["check_ok"] = ok
-                    if not ok:
+                    if ok is False:
                         s["last_error"] = err
                         if "401" in err or "403" in err:
                             s["auth_error"] = True
                     save_state(st)
-                out["verify"] = {"ok": ok, "ms": ms, "model": used, "error": err}
+                out["verify"] = {"ok": ok, "skipped": ok is None, "ms": ms,
+                                 "model": used, "error": err}
             return self._json(200, out)
 
         if len(tail) == 3 and tail[0] == "accounts":
@@ -2088,17 +2817,20 @@ class Handler(BaseHTTPRequestHandler):
                     s = acc_state(st, name)
                     s["checked_at"] = int(time.time())
                     s["check_ok"] = ok
-                    if ok:
+                    if ok is True:
                         s["auth_error"] = False
                         s["cooldown_until"] = 0
                         s["fail_streak"] = 0
                         s["last_error"] = ""
-                    else:
+                    elif ok is False:
                         s["last_error"] = err
                         if "401" in err or "403" in err:
                             s["auth_error"] = True
+                        if _quota_error(err):
+                            _mark_quota(s, err)
                     save_state(st)
-                return self._json(200, {"ok": ok, "ms": ms, "model": used, "error": err})
+                return self._json(200, {"ok": ok, "skipped": ok is None, "ms": ms,
+                                        "model": used, "error": err})
             if action == "reset":
                 # 只清冷却/鉴权/错误标记，不动今天的用量统计
                 with STATE_LOCK:
@@ -2107,17 +2839,10 @@ class Handler(BaseHTTPRequestHandler):
                     s["auth_error"] = False
                     s["fail_streak"] = 0
                     s["last_error"] = ""
+                    s["quota_until"] = 0          # 手动解冻（额度其实没恢复，慎用）
+                    s["quota_reason"] = ""
                     save_state(st)
                 return self._json(200, {"ok": True})
-            if action == "calibrate":
-                try:
-                    v = float(d.get("neurons"))
-                except (TypeError, ValueError):
-                    return self._json(400, _err_body("neurons 必须是数字", 400))
-                with STATE_LOCK:
-                    acc_state(st, name)["neurons"] = round(max(0.0, v), 4)
-                    save_state(st)
-                return self._json(200, {"ok": True, "neurons": v})
             return self._json(404, _err_body("未知操作", 404))
 
         if tail == ["catalog", "refresh"]:
@@ -2357,8 +3082,240 @@ class Handler(BaseHTTPRequestHandler):
         if imgs:
             body["images"] = imgs if isinstance(imgs, list) else [imgs]
 
-        status, data, acct = decide_call(cfg, st, model_id, body)
+        status, data, acct = run_call(cfg, st, model_id, body)
+        self._mark(model_id, acct)
         record_key_usage(st, key_name, status == 200)   # 内部自带锁，不能再套 STATE_LOCK
+        with STATE_LOCK:
+            save_state(st)
+        if status != 200:
+            return self._json(status, data)
+        if acct:
+            self._extra_headers = {"X-Cfai-Account": acct}
+        return self._json(200, data)
+
+    def _handle_images(self, payload, key_name, st):
+        """POST /v1/images/generations —— OpenAI 图像接口 → CF 原生 /ai/run"""
+        cfg = Handler.cfg
+        if not isinstance(payload, dict):
+            return self._json(400, _err_body("invalid json body", 400))
+        prompt = str(payload.get("prompt") or "").strip()
+        if not prompt:
+            return self._json(400, _err_body("prompt 必填", 400))
+
+        model = str(payload.get("model") or DEFAULT_IMAGE_MODEL)
+        model_id = (cfg.get("aliases") or {}).get(model, model)
+        if not model_id.startswith("@"):
+            model_id = "@cf/black-forest-labs/" + model_id
+
+        try:
+            n = max(1, min(4, int(payload.get("n") or 1)))
+        except (TypeError, ValueError):
+            n = 1
+        fmt = str(payload.get("response_format") or "b64_json")
+
+        fields = {"prompt": prompt}
+        for k in ("negative_prompt", "width", "height", "steps", "num_steps",
+                  "seed", "guidance", "aspect_ratio"):
+            if payload.get(k) is not None:
+                fields[k] = payload[k]
+
+        out = []
+        for _ in range(n):
+            if _wants_multipart(model_id):
+                boundary = "----cfai" + secrets.token_hex(8)
+                raw = _multipart_body(fields, boundary)
+                ctype = "multipart/form-data; boundary=" + boundary
+            else:
+                raw, ctype = None, None
+            status, data, acct = run_call(cfg, st, model_id, fields, raw=raw, ctype=ctype)
+            self._mark(model_id, acct)
+            if status != 200:
+                record_key_usage(st, key_name, False)
+                with STATE_LOCK:
+                    save_state(st)
+                return self._json(status, data)
+            b64 = _extract_image(data)
+            if not b64:
+                return self._json(502, _err_body("上游没有返回 image 字段", 502))
+            if fmt == "url":
+                out.append({"url": "data:%s;base64,%s" % (_sniff_image_mime(b64), b64),
+                            "revised_prompt": prompt})
+            else:
+                out.append({"b64_json": b64, "revised_prompt": prompt})
+
+        record_key_usage(st, key_name, True)
+        with STATE_LOCK:
+            save_state(st)
+        return self._json(200, {"created": int(time.time()), "data": out})
+
+    def _handle_vision(self, payload, key_name, st):
+        """带图片的 /v1/chat/completions → CF 视觉模型（JSON + 图片字节数组）"""
+        cfg = Handler.cfg
+        model_id = self._resolve(str(payload.get("model") or "@cf/llava-hf/llava-1.5-7b-hf"))
+        prompt, images = split_content(payload)
+        if not images:
+            return self._json(400, _err_body("没有解析到图片（image_url 需要 data: 或 http 地址）", 400))
+        if not prompt:
+            prompt = "Describe the image."
+
+        body = {"prompt": prompt, "image": list(images[0])}
+        if payload.get("max_tokens"):
+            body["max_tokens"] = payload["max_tokens"]
+
+        status, data, acct = run_call(cfg, st, model_id, body)
+        self._mark(model_id, acct)
+        record_key_usage(st, key_name, status == 200)
+        with STATE_LOCK:
+            save_state(st)
+        if status != 200:
+            return self._json(status, data)
+
+        res = data.get("result") if isinstance(data.get("result"), dict) else {}
+        text = res.get("description") or res.get("response") or ""
+        tin, tout = _usage_tokens(data)
+        return self._json(200, {
+            "id": "chatcmpl-" + secrets.token_hex(8),
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model_id,
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant", "content": text},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": tin, "completion_tokens": tout,
+                      "total_tokens": tin + tout},
+        })
+
+    def _raw(self, code: int, data: bytes, ctype: str):
+        self._log_req(code, None)
+        self.send_response(code)
+        self.send_header("Content-Type", ctype or "application/octet-stream")
+        self.send_header("Content-Length", str(len(data)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _resolve(self, model: str, default_prefix: str = "") -> str:
+        cfg = Handler.cfg
+        mid = (cfg.get("aliases") or {}).get(model, model)
+        if default_prefix and not mid.startswith("@"):
+            mid = default_prefix + mid
+        return mid
+
+    def _handle_embeddings(self, payload, key_name, st):
+        """POST /v1/embeddings —— OpenAI 向量接口"""
+        if not isinstance(payload, dict):
+            return self._json(400, _err_body("invalid json body", 400))
+        model_id = self._resolve(str(payload.get("model") or "@cf/baai/bge-m3"), "@cf/baai/")
+        inp = payload.get("input")
+        if inp is None:
+            return self._json(400, _err_body("input 必填（字符串或字符串数组）", 400))
+        texts = [inp] if isinstance(inp, str) else [str(x) for x in inp]
+        if not texts:
+            return self._json(400, _err_body("input 不能为空", 400))
+
+        status, data, acct = run_call(Handler.cfg, st, model_id, {"text": texts})
+        self._mark(model_id, acct)
+        if status != 200:
+            record_key_usage(st, key_name, False)
+            with STATE_LOCK:
+                save_state(st)
+            return self._json(status, data)
+
+        res = data.get("result") if isinstance(data.get("result"), dict) else data
+        vecs = res.get("data") or res.get("embeddings") or []
+        if isinstance(vecs, dict):
+            vecs = vecs.get("data") or []
+        out = [{"object": "embedding", "index": i, "embedding": v}
+               for i, v in enumerate(vecs)]
+        tin = sum(_estimate_tokens(t) for t in texts)
+        record_key_usage(st, key_name, True)
+        with STATE_LOCK:
+            save_state(st)
+        return self._json(200, {"object": "list", "data": out,
+                                "model": model_id, "usage": {"prompt_tokens": tin,
+                                                             "total_tokens": tin}})
+
+    def _handle_transcriptions(self, key_name, st):
+        """POST /v1/audio/transcriptions —— 收 multipart 文件，转成 CF 的 multipart"""
+        ctype = self.headers.get("Content-Type") or ""
+        boundary = _boundary_of(ctype)
+        fields = _parse_multipart(self._raw_body, boundary)
+        audio = fields.get("file") or fields.get("audio")
+        if not audio:
+            return self._json(400, _err_body("缺少 file 字段（multipart/form-data）", 400))
+        m = fields.get("model") or b"@cf/openai/whisper"
+        model = m.decode() if isinstance(m, bytes) else str(m)
+        model_id = self._resolve(model, "@cf/openai/")
+
+        b2 = "----cfai" + secrets.token_hex(8)
+        raw = (("--%s\r\n" % b2).encode()
+               + b'Content-Disposition: form-data; name="audio"; filename="audio.bin"\r\n'
+               + b"Content-Type: application/octet-stream\r\n\r\n"
+               + audio + b"\r\n"
+               + ("--%s--\r\n" % b2).encode())
+
+        status, data, acct = run_call(Handler.cfg, st, model_id, {}, raw=raw,
+                                      ctype="multipart/form-data; boundary=" + b2)
+        self._mark(model_id, acct)
+        if status != 200:
+            record_key_usage(st, key_name, False)
+            with STATE_LOCK:
+                save_state(st)
+            return self._json(status, data)
+        res = data.get("result") if isinstance(data.get("result"), dict) else {}
+        text = res.get("text") or ""
+        record_key_usage(st, key_name, True)
+        with STATE_LOCK:
+            save_state(st)
+        out = {"text": text}
+        if str(fields.get("response_format", b"json").decode() if isinstance(fields.get("response_format"), bytes) else "json") == "verbose_json":
+            out["segments"] = res.get("segments") or []
+            out["word_count"] = res.get("word_count")
+        return self._json(200, out)
+
+    def _handle_speech(self, payload, key_name, st):
+        """POST /v1/audio/speech —— 返回二进制音频"""
+        if not isinstance(payload, dict):
+            return self._json(400, _err_body("invalid json body", 400))
+        text = str(payload.get("input") or payload.get("text") or "").strip()
+        if not text:
+            return self._json(400, _err_body("input 必填（要朗读的文本）", 400))
+        model_id = self._resolve(str(payload.get("model") or "@cf/deepgram/aura-1"),
+                                 "@cf/deepgram/")
+        body = {"text": text}
+        if payload.get("voice"):
+            body["speaker"] = payload["voice"]
+        for k in ("encoding", "container"):
+            if payload.get(k):
+                body[k] = payload[k]
+
+        status, data, acct = run_call(Handler.cfg, st, model_id, body, raw_out=True)
+        self._mark(model_id, acct)
+        if status != 200:
+            record_key_usage(st, key_name, False)
+            with STATE_LOCK:
+                save_state(st)
+            return self._json(status, data)
+        audio, actype = data
+        record_key_usage(st, key_name, True)
+        with STATE_LOCK:
+            save_state(st)
+        return self._raw(200, audio, actype or "audio/mpeg")
+
+    def _handle_run(self, payload, key_name, st):
+        """POST /v1/run —— 通用透传：{model, ...CF 原生入参} → CF result 原样返回"""
+        if not isinstance(payload, dict):
+            return self._json(400, _err_body("invalid json body", 400))
+        model = str(payload.get("model") or "").strip()
+        if not model:
+            return self._json(400, _err_body("model 必填", 400))
+        model_id = self._resolve(model)
+        if not model_id.startswith("@"):
+            return self._json(400, _err_body("model 需要完整 id（@cf/...）或已配置的别名", 400))
+        body = {k: v for k, v in payload.items() if k != "model"}
+        status, data, acct = run_call(Handler.cfg, st, model_id, body)
+        self._mark(model_id, acct)
+        record_key_usage(st, key_name, status == 200)
         with STATE_LOCK:
             save_state(st)
         if status != 200:
@@ -2373,16 +3330,13 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0].rstrip("/")
         if path.startswith("/admin/api/"):
             return self._admin_post(path)
-        if path not in ("/v1/chat/completions", "/v1/decide"):
+        if path not in ("/v1/chat/completions", "/v1/decide", "/v1/images/generations",
+                        "/v1/embeddings", "/v1/audio/transcriptions",
+                        "/v1/audio/speech", "/v1/run"):
             return self._json(404, _err_body("not found", 404))
         key_name = self._client_key()
         if key_name is None:
             return self._json(401, _err_body("invalid api key", 401))
-
-        try:
-            payload = json.loads(self._raw_body or b"{}")
-        except (ValueError, json.JSONDecodeError):
-            return self._json(400, _err_body("invalid json body", 400))
 
         with STATE_LOCK:
             if Handler.state is None or Handler.state.get("date") != today():
@@ -2392,8 +3346,31 @@ class Handler(BaseHTTPRequestHandler):
         if over:
             return self._json(429, _err_body(why, 429))
 
+        if path == "/v1/audio/transcriptions":       # multipart，不能先按 JSON 解析
+            self._loginfo = {"path": path, "key": key_name or "", "model": "", "account": "",
+                             "t0": time.time()}
+            return self._handle_transcriptions(key_name, st)
+
+        try:
+            payload = json.loads(self._raw_body or b"{}")
+        except (ValueError, json.JSONDecodeError):
+            return self._json(400, _err_body("invalid json body", 400))
+
+        self._loginfo = {"path": path, "key": key_name or "",
+                         "model": str(payload.get("model") or "") if isinstance(payload, dict) else "",
+                         "account": "", "t0": time.time()}
+
+        if path == "/v1/embeddings":
+            return self._handle_embeddings(payload, key_name, st)
+        if path == "/v1/audio/speech":
+            return self._handle_speech(payload, key_name, st)
+        if path == "/v1/run":
+            return self._handle_run(payload, key_name, st)
+
         if path == "/v1/decide":
             return self._handle_decide(payload, key_name, st)
+        if path == "/v1/images/generations":
+            return self._handle_images(payload, key_name, st)
 
         if not isinstance(payload, dict) or not payload.get("messages"):
             return self._json(400, _err_body("messages is required", 400))
@@ -2401,6 +3378,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, _err_body(
                 "clef/clef-flash/clef-omni 是决策模型（System One API），需要 {state, questions}，"
                 "不能走 /v1/chat/completions。请用 /v1/decide。", 400))
+
+        # 带图片的请求走视觉模型（CF 的视觉模型只收 multipart）
+        if any(isinstance(m.get("content"), list) for m in (payload.get("messages") or [])):
+            if any(isinstance(p, dict) and p.get("type") == "image_url"
+                   for m in (payload.get("messages") or [])
+                   if isinstance(m.get("content"), list)
+                   for p in m["content"]):
+                return self._handle_vision(payload, key_name, st)
 
         want_stream = bool(payload.get("stream"))
 
@@ -2412,6 +3397,7 @@ class Handler(BaseHTTPRequestHandler):
                     save_state(st)
                 return self._json(status, resp)
             record_key_usage(st, key_name, True, _neurons_header(resp) or 0)
+            self._mark(None, acct)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -2438,9 +3424,11 @@ class Handler(BaseHTTPRequestHandler):
                     pass
                 with STATE_LOCK:
                     save_state(st)
+                self._log_req(200, None)
             return
 
         status, data, acct = complete(Handler.cfg, st, payload)
+        self._mark(None, acct)
         if status == 200:
             tin, tout = _usage_tokens(data)
             record_key_usage(st, key_name, True, _data_neurons(data), tin, tout)
@@ -2468,6 +3456,7 @@ def cmd_serve(args) -> int:
     Handler.api_key = (args.api_key or os.environ.get("CFAI_KEY")
                        or os.environ.get("CFAI_API_KEY") or "")
     Handler.state = load_state()
+    load_logs()
 
     def _warm():
         try:
@@ -2477,6 +3466,22 @@ def cmd_serve(args) -> int:
             print(f"模型目录刷新失败: {str(e)[:120]}", file=sys.stderr)
 
     threading.Thread(target=_warm, daemon=True).start()
+
+    def _usage_loop():
+        """定时同步官方用量——计量以官方为准，本地只做兜底。"""
+        interval = float(cfg["router"].get("usage_sync_seconds", 180) or 0)
+        if interval <= 0:
+            return
+        time.sleep(15)
+        while True:
+            try:
+                c = load_config()
+                sync_usage(c, Handler.state or load_state(), None, None)
+            except Exception as e:
+                print(f"官方用量同步失败: {str(e)[:120]}", file=sys.stderr)
+            time.sleep(max(60.0, interval))
+
+    threading.Thread(target=_usage_loop, daemon=True).start()
 
     def _health_loop():
         interval = float(cfg["router"].get("health_check_minutes") or 0)
@@ -2531,7 +3536,7 @@ SAMPLE = {
         "timeout": 120,
         "default_model": "",
         "user_agent": "cfai/1.1",
-        "health_check_minutes": 60,
+        "health_check_minutes": 0,
         "verbose": False
     }
 }
@@ -2689,6 +3694,19 @@ def build_parser():
     d = sub.add_parser("doctor", help="环境自检")
     d.set_defaults(func=cmd_doctor)
 
+    u = sub.add_parser("usage", help="官方用量（GraphQL 分析，需 Account Analytics : Read）")
+    u.add_argument("action", choices=["show", "sync"], nargs="?", default="show")
+    u.add_argument("--account", help="只处理某个账号")
+    u.add_argument("--date", help="日期 YYYY-MM-DD，默认今天（UTC）")
+    u.add_argument("--json", action="store_true")
+    u.set_defaults(func=cmd_usage)
+
+    pr = sub.add_parser("pricing", help="官方定价表（价格 + 神经元费率）")
+    pr.add_argument("action", choices=["show", "sync"], nargs="?", default="show")
+    pr.add_argument("model", nargs="?", help="只看某个模型（模糊匹配）")
+    pr.add_argument("--diff", action="store_true", help="sync 时和本地 catalog 对比")
+    pr.set_defaults(func=cmd_pricing)
+
     i = sub.add_parser("init", help="写入示例配置")
     i.add_argument("--force", action="store_true")
     i.set_defaults(func=cmd_init)
@@ -2701,6 +3719,10 @@ def build_parser():
 
 
 def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # cfai pricing clef  ->  cfai pricing show clef
+    if len(argv) >= 2 and argv[0] == "pricing" and argv[1] not in ("show", "sync"):
+        argv.insert(1, "show")
     p = build_parser()
     args = p.parse_args(argv)
     if not getattr(args, "func", None):

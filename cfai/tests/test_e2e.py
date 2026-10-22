@@ -131,7 +131,10 @@ def main():
     for name in ("ok1", "ok2"):
         cli("account", "add", name, "--type", "openai",
             "--base-url", f"http://127.0.0.1:{PORTS[name]}/v1",
-            "--models", "@cf/meta/llama-3.1-8b-instruct,@cf/cloudflare/clef-flash")
+            "--models", "@cf/meta/llama-3.1-8b-instruct,@cf/cloudflare/clef-flash,"
+                        "@cf/black-forest-labs/flux-2-dev,@cf/baai/bge-m3,"
+                        "@cf/openai/whisper,@cf/deepgram/aura-1,"
+                        "@cf/llava-hf/llava-1.5-7b-hf,@cf/baai/bge-reranker-base")
     cli("alias", "set", "llama", "@cf/meta/llama-3.1-8b-instruct")
     env = dict(os.environ, CFAI_HOME=HOME)
     gw = subprocess.Popen([sys.executable, CLI, "serve", "--port", str(GW)],
@@ -179,9 +182,59 @@ def main():
                       {"model": "clef-flash", "messages": [{"role": "user", "content": "hi"}]})
     ok("clef 走 chat 接口被拒", code == 400 and "/v1/decide" in body, body[:100])
 
+    # /v1/images/generations：OpenAI 图像接口 → CF /ai/run（flux-2 走 multipart）
+    code, body = http(f"http://127.0.0.1:{GW}/v1/images/generations",
+                      {"model": "@cf/black-forest-labs/flux-2-dev", "prompt": "a red apple"})
+    ok("images 200 且返回 b64_json", code == 200 and '"b64_json"' in body, body[:100])
+
+    code, body = http(f"http://127.0.0.1:{GW}/v1/images/generations",
+                      {"model": "@cf/black-forest-labs/flux-2-dev", "prompt": "a cat",
+                       "response_format": "url"})
+    ok("images url 格式带 data URI", code == 200 and '"data:image/' in body, body[:80])
+
+    code, body = http(f"http://127.0.0.1:{GW}/v1/images/generations",
+                      {"model": "@cf/black-forest-labs/flux-2-dev"})
+    ok("images 缺 prompt 报 400", code == 400 and "prompt" in body, body[:80])
+
+    # 向量 / 语音 / 视觉 / 通用透传
+    code, body = http(f"http://127.0.0.1:{GW}/v1/embeddings",
+                      {"model": "@cf/baai/bge-m3", "input": ["a", "b"]})
+    ok("embeddings 返回两条向量", code == 200 and body.count('"index"') == 2, body[:100])
+
+    code, body = http(f"http://127.0.0.1:{GW}/v1/audio/speech",
+                      {"model": "@cf/deepgram/aura-1", "input": "hello"}, raw=True)
+    ok("speech 返回二进制音频", code == 200 and body[:3] == b"ID3", body[:20])
+
+    bnd = "----cfaitest"
+    mp = ((f"--{bnd}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n"
+           f"Content-Type: audio/wav\r\n\r\n").encode() + b"RIFFfakewav"
+          + f"\r\n--{bnd}--\r\n".encode())
+    req = urllib.request.Request(f"http://127.0.0.1:{GW}/v1/audio/transcriptions", data=mp,
+                                 headers={"Content-Type": f"multipart/form-data; boundary={bnd}"},
+                                 method="POST")
+    with urllib.request.urlopen(req, timeout=30) as r:
+        body = r.read().decode()
+    ok("transcriptions 返回文本", r.status == 200 and "mock transcript" in body, body[:80])
+
+    code, body = http(f"http://127.0.0.1:{GW}/v1/chat/completions",
+                      {"model": "@cf/llava-hf/llava-1.5-7b-hf",
+                       "messages": [{"role": "user", "content": [
+                           {"type": "text", "text": "这是什么"},
+                           {"type": "image_url", "image_url": {
+                               "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="}}]}]})
+    ok("带图请求走视觉路由", code == 200 and "mock vision answer" in body, body[:100])
+
+    code, body = http(f"http://127.0.0.1:{GW}/v1/run",
+                      {"model": "@cf/baai/bge-reranker-base", "query": "q",
+                       "contexts": [{"text": "a"}]})
+    ok("run 通用透传 200", code == 200 and '"result"' in body, body[:80])
+
+    code, body = http(f"http://127.0.0.1:{GW}/admin/api/logs")
+    ok("日志接口有记录", code == 200 and '"path"' in body and '"status"' in body, body[:80])
+
     # 轮询是否均匀落到两个账号（decide 也打了上游，重新取基线）
     d1, d2 = hits(PORTS["ok1"]) - h1_before, hits(PORTS["ok2"]) - h2_before
-    ok("网关三次请求分摊到两个账号", d1 + d2 == 3 and min(d1, d2) >= 1, f"ok1 +{d1} ok2 +{d2}")
+    ok("网关十次请求分摊到两个账号", d1 + d2 == 10 and min(d1, d2) >= 1, f"ok1 +{d1} ok2 +{d2}")
 
     print("\n[6] 每日请求上限")
     shutil.rmtree(HOME)

@@ -46,7 +46,16 @@
   .badge.ready{color:var(--ok);border-color:#1f6f34;background:#0f2417}
   .badge.cooling{color:var(--warn);border-color:#6b5217;background:#241f0f}
   .badge.auth_error{color:var(--bad);border-color:#6b1f1c;background:#241010}
-  .acct{display:flex;flex-direction:column;gap:10px}
+  .acct{display:flex;flex-direction:column;gap:10px;position:relative;overflow:hidden}
+  .acct.frozen{background:#0d1015;border-color:#20252d;filter:saturate(.25)}
+  .acct.frozen .bar i{background:#4b5563 !important}
+  .acct.frozen .name,.acct.frozen .muted{color:#6b7280}
+  .acct .snow{position:absolute;top:0;right:0;width:30px;height:30px;display:grid;place-items:center;
+    font-size:14px;line-height:1;color:#9fc4e8;background:#17212c;border-left:1px solid #24303d;
+    border-bottom:1px solid #24303d;border-radius:0 11px 0 11px}
+  .srcb{font-size:9px;letter-spacing:.5px;padding:1px 4px;border-radius:4px;margin-left:5px;
+    color:var(--ok);border:1px solid #1f6f34;background:#0f2417;vertical-align:1px}
+  .srcb.loc{color:var(--warn);border-color:#6b5217;background:#241f0f}
   .acct .top{display:flex;align-items:center;gap:8px}
   .acct .name{font-weight:600;font-family:var(--mono)}
   .bar{height:6px;border-radius:4px;background:#0f141c;overflow:hidden}
@@ -57,7 +66,7 @@
   .mono{font-family:var(--mono)}
   table{width:100%;border-collapse:collapse;font-size:13px}
   th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
-  th{color:var(--dim);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+  th{color:var(--dim);font-weight:500;font-size:12px;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
   tr:hover td{background:#121824}
   .err{color:var(--bad);font-size:12px;word-break:break-all;max-width:420px}
   .modal{position:fixed;inset:0;background:#000a;display:none;align-items:center;justify-content:center;padding:20px;z-index:50}
@@ -96,8 +105,21 @@
   .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px}
   .empty{color:var(--dim);text-align:center;padding:26px}
   .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}
+  .grid3{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
   .chip{display:inline-block;font-size:11px;font-family:var(--mono);background:#0f141c;border:1px solid var(--line);
         border-radius:6px;padding:2px 7px;margin:2px 3px 0 0;color:var(--dim)}
+  .catbadge{font-size:11px;padding:2px 7px;border-radius:6px;border:1px solid var(--line);
+            white-space:nowrap;color:var(--dim);display:inline-block}
+  .catbadge.paid{color:var(--bad);border-color:#6b1f1c;background:#241010}
+  .catbadge.free{color:var(--ok);border-color:#1f6f34;background:#0f2417}
+  .catbadge.in_only{color:var(--warn);border-color:#6b5217;background:#241f0f}
+  .catbadge.both{color:#9db4d0;border-color:#2b3d55;background:#111a26}
+  .catbadge.unit{color:#b6a3d8;border-color:#3b2f52;background:#181327}
+  tr.grp td{background:#0f141c;color:var(--dim);font-size:11px;letter-spacing:.5px;
+            padding:6px 10px;border-bottom:1px solid var(--line)}
+  tr.grp:hover td{background:#0f141c}
+  #modelTable td{white-space:nowrap}
+  #modelTable td:nth-child(n+6){text-align:right}
   .tscroll{overflow:auto}
   .keycell{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 
@@ -182,6 +204,7 @@
     <div class="tab" data-tab="accounts" onclick="switchTab('accounts')">账号</div>
     <div class="tab" data-tab="keys" onclick="switchTab('keys')">KEY</div>
     <div class="tab" data-tab="models" onclick="switchTab('models')">模型</div>
+    <div class="tab" data-tab="logs" onclick="switchTab('logs')">日志</div>
     <div class="tab" data-tab="settings" onclick="switchTab('settings')">设置</div>
   </div>
 
@@ -229,13 +252,14 @@
         <h3 style="margin:0">账号列表</h3>
         <div class="row">
           <button onclick="testAll()">全部测试</button>
+          <button onclick="syncUsage()" title="从 Cloudflare 分析接口拉官方神经元用量（token 需 Account Analytics : Read）">同步官方用量</button>
           <button class="primary" onclick="openAdd()">+ 添加账号</button>
         </div>
       </div>
       <div class="tscroll">
         <table class="resp">
           <thead><tr>
-            <th>名称</th><th>类型</th><th>状态</th><th>请求</th><th>失败</th>
+            <th>名称</th><th>类型</th><th>状态</th><th title="Cloudflare 官方统计：包含自动体检、Playground 等所有调用">请求(官方)</th><th>失败</th>
             <th>神经元</th><th>Key</th><th>操作</th>
           </tr></thead>
           <tbody id="acctTable"></tbody>
@@ -283,15 +307,47 @@
           <label class="muted" style="display:flex;align-items:center;gap:6px;font-size:12px">
             <input type="checkbox" id="onlyAllowed" style="width:auto" onchange="renderModels()"> 只看已启用
           </label>
+          <select id="modelCat" style="width:auto;min-width:132px" onchange="renderModels()"></select>
           <input id="modelQ" placeholder="搜索模型…" style="width:200px" oninput="renderModels()">
           <button class="primary" onclick="refreshCatalog()">拉取模型</button>
         </div>
       </div>
       <div style="overflow:auto;max-height:56vh">
         <table>
-          <thead><tr><th style="width:52px">启用</th><th>模型 ID</th><th>任务</th><th>上下文</th><th>输入 $/M</th><th>输出 $/M</th><th>账号</th></tr></thead>
+          <thead><tr><th style="width:52px">启用</th><th style="width:100px">分类</th><th>模型 ID</th><th style="width:150px">任务</th><th style="width:150px">路由</th><th style="width:80px">上下文</th><th style="width:88px">输入 $/M</th><th style="width:88px">输出 $/M</th><th style="width:52px">账号</th></tr></thead>
           <tbody id="modelTable"></tbody>
         </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日志 -->
+  <div id="tab-logs" style="display:none">
+    <div class="panel">
+      <div class="row" style="justify-content:space-between;margin-bottom:14px">
+        <h3 style="margin:0">调用记录 <span class="muted" id="logMeta"></span></h3>
+        <div class="row">
+          <select id="logStatus" style="width:auto;min-width:90px" onchange="loadLogs()">
+            <option value="">全部</option>
+            <option value="ok">成功</option>
+            <option value="bad">失败</option>
+          </select>
+          <input id="logQ" placeholder="搜索模型 / 账号 / Key" style="width:180px" oninput="renderLogs()">
+          <button onclick="loadLogs()">刷新</button>
+        </div>
+      </div>
+      <div class="tscroll" style="max-height:62vh">
+        <table class="resp">
+          <thead><tr>
+            <th style="width:92px">时间</th><th style="width:150px">接口</th><th>模型</th>
+            <th style="width:110px">账号</th><th style="width:72px">状态</th>
+            <th style="width:76px">耗时</th><th style="width:88px">Key</th>
+          </tr></thead>
+          <tbody id="logTable"></tbody>
+        </table>
+      </div>
+      <div class="muted" style="font-size:11px;margin-top:10px">
+        最近 1000 条，落盘在 <span class="mono">~/.config/cfai/logs.jsonl</span>（超过 5MB 滚动）
       </div>
     </div>
   </div>
@@ -317,7 +373,7 @@
           <div class="hint">所有账号发出的请求头；账号可单独覆盖</div></div>
         <div class="field"><label>默认每日神经元额度</label><input id="rDefaultNeu" type="number" min="0" placeholder="10000">
           <div class="hint">账号没单独设置时按此计算剩余额度（CF 免费 10000/天），0=不限</div></div>
-        <div class="field"><label>自动体检间隔（分钟）</label><input id="rHealth" type="number" min="0" placeholder="60">
+        <div class="field"><label>探测式体检间隔（分钟，0=不用）</label><input id="rHealth" type="number" min="0" placeholder="0">
           <div class="hint">后台定时真实探测每个账号，0=关闭（关闭后新账号会一直显示「未验证」）</div></div>
       </div>
       <button class="primary" onclick="saveRouter()">保存</button>
@@ -367,7 +423,7 @@
       <div class="field"><label>Account ID</label><input id="mAcctId" placeholder="32 位 hex"></div>
       <div class="field"><label>API Token</label><input id="mToken" placeholder="cfut_..."></div>
     </div>
-    <div class="grid2">
+    <div class="grid3">
       <div class="field"><label>每日请求上限</label><input id="mDailyReq" type="number" min="0" placeholder="不限"></div>
       <div class="field"><label>每日神经元上限</label><input id="mDailyNeu" type="number" min="0" placeholder="如 10000"></div>
       <div class="field"><label>每分钟请求上限</label><input id="mRpm" type="number" min="0" placeholder="不限"></div>
@@ -381,7 +437,7 @@
       <label style="display:flex;align-items:center;gap:8px;color:var(--txt)">
         <input type="checkbox" id="mVerify" checked style="width:auto"> 保存后立即真实探测一次
       </label>
-      <div class="hint">不探测的话状态会显示「未验证」，直到下一次自动体检或手动测试</div>
+      <div class="hint">不探测的话状态显示「未验证」，直到下一次官方用量同步或手动测试</div>
     </div>
     </div>
     <div class="mfoot">
@@ -518,12 +574,18 @@ async function load(){
 /* ---------- 概览 ---------- */
 function renderOverview(){
   const t = SNAP.totals;
+  // 官方请求数包含网关之外的调用（Playground、别的脚本），成功/失败只有网关自己知道，
+  // 所以成功率必须用「网关内」的次数算，不能拿官方总数当分母。
+  const gw = (t.gateway_requests !== undefined && t.gateway_requests !== null)
+    ? t.gateway_requests : (t.ok + t.fail);
   $('sReq').textContent = t.requests;
-  $('sReqSub').textContent = `成功 ${t.ok} · 失败 ${t.fail}`;
-  const rate = t.requests ? (t.ok / t.requests * 100) : 100;
+  $('sReqSub').textContent = t.requests > gw
+    ? `本网关 ${gw} 次 · 成功 ${t.ok} · 失败 ${t.fail}`
+    : `成功 ${t.ok} · 失败 ${t.fail}`;
+  const rate = gw ? (t.ok / gw * 100) : 100;
   $('sRate').textContent = rate.toFixed(1) + '%';
   $('sRate').style.color = rate >= 99 ? 'var(--ok)' : rate >= 90 ? 'var(--warn)' : 'var(--bad)';
-  $('sRateSub').textContent = `失败 ${t.fail} 次`;
+  $('sRateSub').textContent = gw ? `本网关 ${t.ok}/${gw} · 失败 ${t.fail} 次` : '暂无请求';
   $('sNeu').textContent = fmt(t.neurons);
   $('sNeuSub').textContent = `输入 ${fmt(t.tokens_in)} / 输出 ${fmt(t.tokens_out)} tokens`;
   if (t.budget > 0){
@@ -655,11 +717,17 @@ addEventListener('resize', () => {
   _rszT = setTimeout(() => { if (SNAP && SNAP.hourly) drawChart(SNAP.hourly); }, 150);
 });
 
+function fmtLeft(s){
+  s = Math.max(0, s|0);
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  return h ? `${h}h${String(m).padStart(2,'0')}m` : `${m}m`;
+}
 function statusBadge(a){
-  if (a.status === 'ready') return '<span class="badge ready" title="最近体检通过">就绪</span>';
+  if (a.status === 'ready') return '<span class="badge ready" title="最近一次官方用量同步成功">就绪</span>';
   if (a.status === 'cooling') return `<span class="badge cooling">冷却 ${a.cooldown_left}s</span>`;
-  if (a.status === 'unverified') return '<span class="badge" title="还没做过真实探测">未验证</span>';
-  if (a.status === 'error') return '<span class="badge auth_error" title="最近体检失败">异常</span>';
+  if (a.status === 'quota') return `<span class="badge cooling" title="${esc(a.quota_reason || '今日额度用尽')}">额度用尽</span>`;
+  if (a.status === 'unverified') return '<span class="badge" title="还没同步过官方用量，也没探测过">未验证</span>';
+  if (a.status === 'error') return '<span class="badge auth_error" title="最近一次探测失败">异常</span>';
   return '<span class="badge auth_error">鉴权失败</span>';
 }
 
@@ -669,17 +737,20 @@ function renderAcctCards(){
   el.innerHTML = SNAP.accounts.map(a => {
     const pct = a.budget ? Math.min(100, a.neurons / a.budget * 100) : 0;
     const cls = pct > 85 ? 'bad' : pct > 60 ? 'warn' : '';
-    return `<div class="card acct">
+    return `<div class="card acct${a.status === 'quota' ? ' frozen' : ''}">
+      ${a.status === 'quota' ? `<span class="snow" title="额度用尽已冻结 · ${fmtLeft(a.quota_left)} 后恢复（UTC 00:00）">❄</span>` : ''}
       <div class="top"><span class="name">${esc(a.name)}</span>${statusBadge(a)}<span class="spacer"></span>
         <span class="muted mono">${a.type}</span></div>
       <div class="row" style="gap:18px">
         <span class="muted">请求 <b class="mono" style="color:var(--txt)">${a.requests}</b></span>
         <span class="muted">失败 <b class="mono" style="color:${a.fail?'var(--bad)':'var(--txt)'}">${a.fail}</b></span>
-        <span class="muted">神经元 <b class="mono" style="color:var(--txt)">${fmt(a.neurons)}</b></span>
+        <span class="muted">神经元 <b class="mono" style="color:var(--txt)">${fmt(a.neurons)}</b>${a.neurons_source === 'official'
+          ? '<span class="srcb" title="Cloudflare 官方计量">官方</span>'
+          : '<span class="srcb loc" title="该账号 token 没有 Analytics 权限，暂时用本地计数">本地</span>'}</span>
       </div>
       ${a.budget ? `<div class="bar ${cls}"><i style="width:${pct}%"></i></div>
         <div class="muted">剩余 ${fmtExact(a.remaining)} / ${fmtExact(a.budget)}${a.budget_is_default ? ' · 默认额度' : ''} · 已用 ${fmtExact(a.neurons)}</div>` : '<div class="muted">未设额度上限</div>'}
-      ${a.last_error ? `<div class="err" title="${esc(a.last_error)}">${esc(a.last_error.slice(0,90))}</div>` : ''}
+      ${a.last_error && a.status !== 'quota' ? `<div class="err" title="${esc(a.last_error)}">${esc(a.last_error.slice(0,90))}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -700,7 +771,7 @@ function renderAccounts(){
       <button onclick="testOne('${esc(a.name)}')">测试</button>
       <button onclick="editAccount('${esc(a.name)}')">编辑</button>
       <button onclick="resetOne('${esc(a.name)}')">重置</button>
-      <button onclick="calibrate('${esc(a.name)}', ${a.neurons})">校准</button>
+      <button onclick="calibrate('${esc(a.name)}')" title="从 Cloudflare 拉官方用量并校准本地计数${a.official_at ? ' · 上次 ' + new Date(a.official_at*1000).toLocaleTimeString('zh-CN',{hour12:false}) : ''}">校准</button>
       <button class="danger" onclick="delOne('${esc(a.name)}')">删除</button>
     </td></tr>`).join('');
 }
@@ -725,14 +796,19 @@ async function resetOne(name){
   catch(e){ toast(e.message,'bad'); }
   load();
 }
-async function calibrate(name, cur){
-  const v = prompt(`把 ${name} 今天的「已用神经元」改成多少？\n（填 Cloudflare 后台看到的数字，用于和本网关统计对齐）`, Math.round(cur));
-  if (v === null) return;
-  const n = Number(v);
-  if (!isFinite(n) || n < 0) return toast('请输入数字', 'bad');
-  try{ await api('/admin/api/accounts/'+encodeURIComponent(name)+'/calibrate', {method:'POST', body:{neurons:n}});
-       toast(name + ' 已校准为 ' + n); }
-  catch(e){ toast(e.message,'bad'); }
+async function calibrate(name){
+  const btn = event && event.target;
+  if (btn){ btn.disabled = true; btn.textContent = '同步中'; }
+  try{
+    const r = await api('/admin/api/accounts/' + encodeURIComponent(name) + '/sync', {method:'POST', body:{}});
+    if (r.ok){
+      const diff = r.official.neurons - (r.prev_neurons || 0);
+      toast(`${name} 已校准：官方 ${fmtExact(r.official.neurons)} 神经元 · ${r.official.requests} 次（原 ${fmtExact(r.prev_neurons||0)}，差 ${diff>=0?'+':''}${fmtExact(diff)}）`, 'ok');
+    } else {
+      toast(`${name} 校准失败：${r.error || '未知错误'}`, 'bad');
+    }
+  }catch(e){ toast(name + ' 校准失败：' + e.message, 'bad'); }
+  if (btn){ btn.disabled = false; btn.textContent = '校准'; }
   load();
 }
 async function delOne(name){
@@ -1003,6 +1079,7 @@ async function loadModels(){
     $('catMeta').textContent = MODELS.length ? `（${MODELS.length} 个）` : '';
     $('allowMeta').textContent = ALLOW.length ? `已启用 ${ALLOW.length}` : '未限制（全部可用）';
     $('allowMeta').className = 'badge' + (ALLOW.length ? ' ready' : '');
+    fillCatSelect();
     renderModels();
   }catch(e){ toast(e.message,'bad'); }
 }
@@ -1030,32 +1107,65 @@ function toggleAllow(id, on){
     })
     .catch(e => toast(e.message, 'bad'));
 }
+const CAT_ORDER = ['paid','free','in_only','both','unit'];
+const CAT_LABEL = {paid:'需付费订阅', free:'价格未知', in_only:'只收输入', both:'双向收费', unit:'按次计费'};
+const CAT_HINT = {
+  paid:   'CF 要求 Workers Paid 或 AI Gateway 预充值，免费账号调不了',
+  free:   '官方定价页没列这个模型，实际仍按神经元计费，不一定免费',
+  in_only:'输出免费，回答越长越划算',
+  both:   '输入输出都按 token 计费',
+  unit:   '按次 / 分钟 / 字符计价，非 token'
+};
+
+function fillCatSelect(){
+  const sel = $('modelCat'); if (!sel) return;
+  const cur = sel.value, cnt = {};
+  MODELS.forEach(m => { cnt[m.cat] = (cnt[m.cat] || 0) + 1; });
+  sel.innerHTML = `<option value="">全部分类（${MODELS.length}）</option>` +
+    CAT_ORDER.filter(k => cnt[k]).map(k => `<option value="${k}">${CAT_LABEL[k]}（${cnt[k]}）</option>`).join('');
+  sel.value = cur;
+}
+
 function renderModels(){
   const q = ($('modelQ').value || '').toLowerCase();
   const onlyOn = $('onlyAllowed').checked;
+  const cat = $('modelCat').value;
   const rows = MODELS.filter(m => (!q || m.id.toLowerCase().includes(q) || (m.task||'').toLowerCase().includes(q))
-                                   && (!onlyOn || m.allowed));
+                                   && (!onlyOn || m.allowed)
+                                   && (!cat || m.cat === cat));
   const price = (m, isOut) => {
-    const extra = (m.price_other && m.price_other[0])
+    const extra = (m.price_other && m.price_other[0] && m.price_other[0].price)
       ? `${m.price_other[0].price}/${String(m.price_other[0].unit || '').replace('per ', '')}` : null;
     if (isOut) {
       if (m.price_out !== null && m.price_out !== undefined) return '<span class="mono">' + m.price_out + '</span>';
-      if (m.price_in !== null && m.price_in !== undefined) return '<span class="badge ready" style="font-size:10px">免费</span>';
-      return '<span class="muted">–</span>';
+      if (m.price_in !== null && m.price_in !== undefined) return '<span class="badge ready" style="font-size:10px">输出免费</span>';
+      return '<span class="muted">未知</span>';
     }
     if (m.price_in !== null && m.price_in !== undefined) return '<span class="mono">' + m.price_in + '</span>';
     if (extra) return '<span class="mono muted" style="font-size:11px">' + extra + '</span>';
-    return '<span class="muted">–</span>';
+    return '<span class="muted">未知</span>';
   };
-  $('modelTable').innerHTML = rows.length ? rows.map(m => `<tr>
+
+  let html = '', lastCat = null;
+  rows.forEach(m => {
+    if (m.cat !== lastCat){
+      lastCat = m.cat;
+      const n = rows.filter(x => x.cat === m.cat).length;
+      html += `<tr class="grp"><td colspan="9">${CAT_LABEL[m.cat] || m.cat} · ${n} 个　${CAT_HINT[m.cat] || ''}</td></tr>`;
+    }
+    html += `<tr>
       <td><input type="checkbox" style="width:auto" ${m.allowed ? 'checked' : ''} onchange="toggleAllow('${esc(m.id)}', this.checked)"></td>
+      <td><span class="catbadge ${esc(m.cat)}">${CAT_LABEL[m.cat] || m.cat}</span></td>
       <td class="mono">${esc(m.id)}</td>
       <td class="muted">${esc(m.task || '–')}</td>
+      <td class="mono" style="font-size:11px;color:${m.route === '/v1/run' ? 'var(--warn)' : 'var(--acc)'}">${esc(m.route || '–')}</td>
       <td class="mono muted">${m.context || '–'}</td>
       <td>${price(m, false)}</td>
       <td>${price(m, true)}</td>
       <td class="mono">${m.accounts}</td>
-    </tr>`).join('') : '<tr><td colspan="7" class="empty">没有匹配的模型，点「拉取模型」试试</td></tr>';
+    </tr>`;
+  });
+  $('modelTable').innerHTML = html || '<tr><td colspan="9" class="empty">没有匹配的模型，点「拉取模型」试试</td></tr>';
   fillCalcSelect();
 }
 function fillCalcSelect(){
@@ -1073,9 +1183,19 @@ function calcCost(){
   const m = MODELS.find(x => x.id === id);
   const el = $('calcResult');
   if (!m){ el.textContent = ''; return; }
+  const hasIn = m.price_in !== null && m.price_in !== undefined;
+  const hasOut = m.price_out !== null && m.price_out !== undefined;
+  if (!hasIn && !hasOut){                     // 官方没给单价，别算出个假的 $0
+    const extra = (m.price_other && m.price_other[0]);
+    el.textContent = extra
+      ? `按量计价：$${extra.price} / ${String(extra.unit || '').replace('per ', '')}`
+      : '未知（官方未给单价）';
+    el.style.color = 'var(--dim)';
+    return;
+  }
   const tin = Number($('calcIn').value || 0), tout = Number($('calcOut').value || 0);
   const cost = (tin / 1e6) * (m.price_in || 0) + (tout / 1e6) * (m.price_out || 0);
-  const freeOut = (m.price_out === null || m.price_out === undefined);
+  const freeOut = !hasOut;
   el.textContent = `≈ $${cost.toFixed(6)}` + (freeOut ? '（输出免费）' : '');
   el.style.color = cost === 0 ? 'var(--ok)' : 'var(--txt)';
 }
@@ -1100,7 +1220,7 @@ function renderSettings(){
   $('rDefault').value = r.default_model || '';
   $('rUA').value = r.user_agent || '';
   $('rDefaultNeu').value = r.default_daily_neurons ?? 10000;
-  $('rHealth').value = r.health_check_minutes ?? 60;
+  $('rHealth').value = r.health_check_minutes ?? 0;
   const al = SNAP.aliases || {};
   $('aliasList').innerHTML = Object.keys(al).length
     ? Object.entries(al).map(([k,v]) => `<div class="row" style="margin-bottom:6px">
@@ -1137,13 +1257,55 @@ async function delAlias(name){
   catch(e){ toast(e.message,'bad'); }
 }
 
+/* ---------- 官方用量同步 ---------- */
+let LOGS = [];
+async function syncUsage(){
+  toast('正在从 Cloudflare 拉官方用量…');
+  try{
+    const d = await api('/admin/api/usage/sync', {method:'POST', body:{}});
+    if (d.synced) toast(`已同步 ${d.synced}/${d.total} 个账号`, 'ok');
+    else if (d.need_permission) toast(`${d.need_permission} 个账号的 token 缺少 Account Analytics : Read 权限`, 'bad');
+    else toast('同步失败', 'bad');
+    await load();
+  }catch(e){ toast(e.message, 'bad'); }
+}
+
+/* ---------- 日志 ---------- */
+async function loadLogs(){
+  try{
+    const st = $('logStatus').value;
+    const d = await api('/admin/api/logs?limit=300' + (st ? '&status=' + st : ''));
+    LOGS = d.logs || [];
+    $('logMeta').textContent = `（${d.total} 条）`;
+    renderLogs();
+  }catch(e){ toast(e.message, 'bad'); }
+}
+function renderLogs(){
+  const q = ($('logQ').value || '').toLowerCase();
+  const rows = LOGS.filter(l => !q ||
+    ((l.model||'') + ' ' + (l.account||'') + ' ' + (l.key||'') + ' ' + (l.path||'')).toLowerCase().includes(q));
+  const tt = ts => new Date(ts * 1000).toLocaleTimeString('zh-CN', {hour12:false});
+  $('logTable').innerHTML = rows.length ? rows.map(l => `<tr>
+    <td class="mono muted" data-label="时间">${tt(l.ts)}</td>
+    <td class="mono" data-label="接口" style="font-size:11px">${esc((l.path||'').replace('/v1', ''))}</td>
+    <td class="mono" data-label="模型">${esc((l.model||'–').replace('@cf/', ''))}</td>
+    <td class="muted" data-label="账号">${esc(l.account || '–')}</td>
+    <td data-label="状态">${l.status === 200
+        ? '<span class="badge ready">200</span>'
+        : `<span class="badge auth_error" title="${esc(l.error||'')}">${l.status}</span>`}</td>
+    <td class="mono" data-label="耗时">${l.ms}ms</td>
+    <td class="muted" data-label="Key">${esc(l.key || '–')}</td>
+  </tr>`).join('') : '<tr><td colspan="7" class="empty">还没有调用记录</td></tr>';
+}
+
 /* ---------- tab ---------- */
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('on', t.dataset.tab === name));
-  ['overview','accounts','keys','models','settings'].forEach(n => {
+  ['overview','accounts','keys','models','logs','settings'].forEach(n => {
     $('tab-'+n).style.display = (n === name) ? '' : 'none';
   });
   if (name === 'models' && !MODELS.length) loadModels();
+  if (name === 'logs') loadLogs();
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
