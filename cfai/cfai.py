@@ -30,7 +30,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.10.0"
+VERSION = "1.11.0"
 
 CF_ACCOUNT_CHAT = "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1/chat/completions"
 CF_ACCOUNT_MODELS = "https://api.cloudflare.com/client/v4/accounts/{}/ai/v1/models"
@@ -405,9 +405,8 @@ def freeze_account(st: dict, name: str, reason: str = "") -> int:
 # --------------------------------------------------------------------------- 路由
 
 def resolve_model(cfg: dict, acct: dict, model: str) -> str:
-    m = cfg.get("aliases", {}).get(model, model)
-    m = acct.get("model_map", {}).get(m, m)
-    return m
+    """只按全局别名映射一次，不再按账号 model_map 换模型（指定什么就用什么）。"""
+    return cfg.get("aliases", {}).get(model, model)
 
 
 def allowed_models(cfg: dict) -> list:
@@ -866,6 +865,73 @@ def _record_failure(st: dict, cfg: dict, name: str, code: int, msg: str, retry_a
 
 def _err_body(msg: str, code: int) -> dict:
     return {"error": {"message": msg, "type": "cfai_error", "code": code}}
+
+
+_TASK_CACHE = {"mtime": None, "map": {}}
+
+
+def _task_of(model_id: str) -> str:
+    """模型任务类型（来自 catalog）。按 catalog 文件 mtime 缓存，避免每次请求读盘。"""
+    p = catalog_path()
+    try:
+        mt = os.path.getmtime(p)
+    except OSError:
+        return ""
+    if _TASK_CACHE["mtime"] != mt:
+        models = load_catalog().get("models") or {}
+        _TASK_CACHE["map"] = {k: str((v or {}).get("task") or "") for k, v in models.items()}
+        _TASK_CACHE["mtime"] = mt
+    return _TASK_CACHE["map"].get(model_id, "")
+
+
+def _short_name_candidates(cfg: dict) -> set:
+    """可用于「短名 → 完整 id」解析的已知完整 id 集合（白名单 + 目录 + 账号声明）。"""
+    pool = set(allowed_models(cfg))
+    pool.update((load_catalog().get("models") or {}).keys())
+    for a in cfg.get("accounts") or []:
+        for p in (a.get("models") or []):
+            if isinstance(p, str) and p.startswith("@") and not any(c in p for c in "*?["):
+                pool.add(p)
+    return pool
+
+
+def _resolve_short(cfg: dict, name: str) -> str | None:
+    """短名解析成唯一对应的完整 id；命中 0 个或多个都返回 None（不猜、不换模型）。"""
+    hits = [m for m in _short_name_candidates(cfg) if m.rsplit("/", 1)[-1] == name]
+    return hits[0] if len(hits) == 1 else None
+
+
+def strict_model(cfg: dict, requested, default: str = None, expect_task: str = None):
+    """严格解析模型：别名映射一次 + 短名唯一匹配，不换模型、不回落。
+
+    调用方给了 model 就只用这个 model；没给才用接口默认值（同样必须已启用）。
+    返回 (model_id, status, body)，status 非 0 表示直接把这个错误返回给调用方。
+    """
+    aliases = cfg.get("aliases") or {}
+    name = str(requested or "").strip()
+    if not name:
+        name = default or ""
+    if not name:
+        return None, 400, _err_body("未指定 model，且该接口没有默认模型", 400)
+    model_id = aliases.get(name, name)
+    if not model_id.startswith("@") and model_id == name:
+        # 唯一短名（如 clef-flash）解析成同一个模型的完整 id；多个同名则拒绝，绝不挑一个
+        resolved = _resolve_short(cfg, name)
+        if resolved:
+            model_id = resolved
+    if not model_allowed(cfg, model_id):
+        hint = ""
+        if not model_id.startswith("@"):
+            hint = "；这个短名既不是别名也不是完整 id，请用控制台里显示的模型 id 或先配置别名"
+        return None, 403, _err_body(
+            f"模型未启用: {model_id}（在控制台「模型」页勾选后可用{hint}）", 403)
+    if expect_task:
+        task = _task_of(model_id)
+        if task and task.lower() != expect_task.lower():
+            return None, 400, _err_body(
+                f"{model_id} 是「{task}」模型，不能用于「{expect_task}」接口；"
+                f"请显式指定已启用的 {expect_task} 模型（不会自动改用其它模型）", 400)
+    return model_id, 0, None
 
 
 def complete(cfg: dict, st: dict, payload: dict, timeout=None):
@@ -3058,7 +3124,7 @@ class Handler(BaseHTTPRequestHandler):
         cfg = Handler.cfg
         if not isinstance(payload, dict):
             return self._json(400, _err_body("invalid json body", 400))
-        model = str(payload.get("model") or "clef-flash")
+        model = str(payload.get("model") or "clef-flash").strip()
         state = payload.get("state")
         questions = payload.get("questions")
         if state in (None, ""):
@@ -3069,13 +3135,15 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(q, dict) or q.get("type") not in ("noul", "choice", "score"):
                 return self._json(400, _err_body(
                     f"questions.{qid}.type 必须是 noul / choice / score", 400))
+            if not q.get("instructions"):
+                return self._json(400, _err_body(
+                    f"questions.{qid} 缺少 instructions（问题定义用 instructions，不是 prompt）", 400))
 
-        if model.startswith("@"):
-            if cfg["router"].get("alias_only", True) and alias_for(cfg, model):
-                return self._json(403, _err_body("该模型已设置别名，请用别名调用", 403))
-            model_id = model
-        else:
-            model_id = (cfg.get("aliases") or {}).get(model) or ("@cf/cloudflare/" + model)
+        if model.startswith("@") and cfg["router"].get("alias_only", True) and alias_for(cfg, model):
+            return self._json(403, _err_body("该模型已设置别名，请用别名调用", 403))
+        model_id, code, err = strict_model(cfg, model, "clef-flash")
+        if code:
+            return self._json(code, err)
 
         body = {"model": model_id.rsplit("/", 1)[-1], "state": state, "questions": questions}
         imgs = payload.get("images")
@@ -3102,10 +3170,10 @@ class Handler(BaseHTTPRequestHandler):
         if not prompt:
             return self._json(400, _err_body("prompt 必填", 400))
 
-        model = str(payload.get("model") or DEFAULT_IMAGE_MODEL)
-        model_id = (cfg.get("aliases") or {}).get(model, model)
-        if not model_id.startswith("@"):
-            model_id = "@cf/black-forest-labs/" + model_id
+        model_id, code, err = strict_model(cfg, payload.get("model"), DEFAULT_IMAGE_MODEL,
+                                           expect_task="Text-to-Image")
+        if code:
+            return self._json(code, err)
 
         try:
             n = max(1, min(4, int(payload.get("n") or 1)))
@@ -3151,7 +3219,11 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_vision(self, payload, key_name, st):
         """带图片的 /v1/chat/completions → CF 视觉模型（JSON + 图片字节数组）"""
         cfg = Handler.cfg
-        model_id = self._resolve(str(payload.get("model") or "@cf/llava-hf/llava-1.5-7b-hf"))
+        model_id, code, err = strict_model(cfg, payload.get("model"),
+                                           "@cf/llava-hf/llava-1.5-7b-hf",
+                                           expect_task="Image-to-Text")
+        if code:
+            return self._json(code, err)
         prompt, images = split_content(payload)
         if not images:
             return self._json(400, _err_body("没有解析到图片（image_url 需要 data: 或 http 地址）", 400))
@@ -3205,7 +3277,10 @@ class Handler(BaseHTTPRequestHandler):
         """POST /v1/embeddings —— OpenAI 向量接口"""
         if not isinstance(payload, dict):
             return self._json(400, _err_body("invalid json body", 400))
-        model_id = self._resolve(str(payload.get("model") or "@cf/baai/bge-m3"), "@cf/baai/")
+        model_id, code, err = strict_model(Handler.cfg, payload.get("model"), "@cf/baai/bge-m3",
+                                           expect_task="Text Embeddings")
+        if code:
+            return self._json(code, err)
         inp = payload.get("input")
         if inp is None:
             return self._json(400, _err_body("input 必填（字符串或字符串数组）", 400))
@@ -3245,7 +3320,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, _err_body("缺少 file 字段（multipart/form-data）", 400))
         m = fields.get("model") or b"@cf/openai/whisper"
         model = m.decode() if isinstance(m, bytes) else str(m)
-        model_id = self._resolve(model, "@cf/openai/")
+        model_id, code, err = strict_model(Handler.cfg, model, "@cf/openai/whisper",
+                                           expect_task="Automatic Speech Recognition")
+        if code:
+            return self._json(code, err)
 
         b2 = "----cfai" + secrets.token_hex(8)
         raw = (("--%s\r\n" % b2).encode()
@@ -3280,8 +3358,11 @@ class Handler(BaseHTTPRequestHandler):
         text = str(payload.get("input") or payload.get("text") or "").strip()
         if not text:
             return self._json(400, _err_body("input 必填（要朗读的文本）", 400))
-        model_id = self._resolve(str(payload.get("model") or "@cf/deepgram/aura-1"),
-                                 "@cf/deepgram/")
+        model_id, code, err = strict_model(Handler.cfg, payload.get("model"),
+                                           "@cf/deepgram/aura-1",
+                                           expect_task="Text-to-Speech")
+        if code:
+            return self._json(code, err)
         body = {"text": text}
         if payload.get("voice"):
             body["speaker"] = payload["voice"]

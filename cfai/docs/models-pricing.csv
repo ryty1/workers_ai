@@ -1,0 +1,74 @@
+﻿分类,模型,任务,上下文,输入$/M,输出$/M,缓存$/M,其它计价,神经元/M输入,神经元/M输出,典型请求神经元,单账号每日次数,cfai入口
+A 需付费订阅,@cf/zai-org/glm-5.2,Text Generation,262144,1.4,4.4,0.26,,127400,400400,183.8,54,/v1/chat/completions
+A 需付费订阅,@cf/zai-org/glm-5.3,Text Generation,1048576,1.4,4.4,0.26,,127400,400400,183.8,54,/v1/chat/completions
+A 需付费订阅,@cf/moonshotai/kimi-k2.6,Text Generation,262144,0.95,4,0.16,,86450,364000,152.4,65,/v1/chat/completions
+A 需付费订阅,@cf/moonshotai/kimi-k2.7-code,Text Generation,262144,0.95,4,0.19,,86450,364000,152.4,65,/v1/chat/completions
+A 需付费订阅,@cf/deepseek-ai/deepseek-v4-pro-0813,Text Generation,1048576,1.32,3.96,0.044,,120120,360360,168.2,59,/v1/chat/completions
+A 需付费订阅,@cf/deepseek-ai/deepseek-v4-flash-0731,Text Generation,1048576,0.44,1.32,0.014,,40040,120120,56.1,178,/v1/chat/completions
+A 需付费订阅,@cf/deepseek-ai/deepseek-v4.1-flash-1017,Text Generation,1048576,0.3,1.2,0.006,,27300,109200,46.4,215,/v1/chat/completions
+A 需付费订阅,@cf/zai-org/glm-5.3-flash,Text Generation,1048576,0.15,0.5,0.03,,13650,45500,20.5,488,/v1/chat/completions
+B 完全免费,@cf/black-forest-labs/flux-1-schnell,Text-to-Image,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/black-forest-labs/flux-2-dev,Text-to-Image,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/black-forest-labs/flux-2-klein-4b,Text-to-Image,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/black-forest-labs/flux-2-klein-9b,Text-to-Image,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/bytedance/stable-diffusion-xl-lightning,Text-to-Image,,,,,per step=$0,,,—,—,—（网关未暴露）
+B 完全免费,@cf/daily-co/phonellm-mini-alpha-2,Text Generation,262140,,,,,,,—,—,/v1/chat/completions
+B 完全免费,@cf/google/embeddinggemma-300m,Text Embeddings,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/google/gemma-2b-it-lora,Text Generation,8192,,,,,,,—,—,/v1/chat/completions
+B 完全免费,@cf/google/gemma-7b-it-lora,Text Generation,3500,,,,,,,—,—,/v1/chat/completions
+B 完全免费,@cf/llava-hf/llava-1.5-7b-hf,Image-to-Text,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/lykon/dreamshaper-8-lcm,Text-to-Image,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/meta-llama/llama-2-7b-chat-hf-lora,Text Generation,8192,,,,,,,—,—,/v1/chat/completions
+B 完全免费,@cf/mistral/mistral-7b-instruct-v0.2-lora,Text Generation,15000,,,,,,,—,—,/v1/chat/completions
+B 完全免费,@cf/openai/whisper,Automatic Speech Recognition,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/openai/whisper-tiny-en,Automatic Speech Recognition,,,,,,,,—,—,—（网关未暴露）
+B 完全免费,@cf/runwayml/stable-diffusion-v1-5-inpainting,Text-to-Image,,,,,per step=$0,,,—,—,—（网关未暴露）
+B 完全免费,@cf/stabilityai/stable-diffusion-xl-base-1.0,Text-to-Image,,,,,per step=$0,,,—,—,—（网关未暴露）
+B 完全免费,@cf/swiss-ai/apertus-v1.5-8b,Text Generation,262144,,,,,,,—,—,/v1/chat/completions
+B 完全免费,@cf/utter-project/eurollm-9b-it,Text Generation,32000,,,,,,,—,—,/v1/chat/completions
+C 只收输入,@cf/baai/bge-base-en-v1.5,Text Embeddings,153600,0.0666,,,,6061,,3.0,3300,—（网关未暴露）
+C 只收输入,@cf/baai/bge-large-en-v1.5,Text Embeddings,,0.204,,,,18564,,9.3,1077,—（网关未暴露）
+C 只收输入,@cf/baai/bge-m3,Text Embeddings,60000,0.0118,,,,1074,,0.5,18625,—（网关未暴露）
+C 只收输入,@cf/baai/bge-reranker-base,Text Classification,,0.00311,,,,283,,0.1,70668,—（网关未暴露）
+C 只收输入,@cf/baai/bge-small-en-v1.5,Text Embeddings,,0.0202,,,,1838,,0.9,10880,—（网关未暴露）
+C 只收输入,@cf/cloudflare/clairic,Text Generation,65536,0.1,,,,9100,,4.5,2197,/v1/chat/completions
+C 只收输入,@cf/cloudflare/clef,Text Generation,65536,0.24,,,,21840,,10.9,915,/v1/decide
+C 只收输入,@cf/cloudflare/clef-flash,Text Generation,24576,0.038,,,,3458,,1.7,5783,/v1/decide
+C 只收输入,@cf/cloudflare/clef-omni,Text Generation,65536,0.15,,,,13650,,6.8,1465,/v1/decide
+C 只收输入,@cf/huggingface/distilbert-sst-2-int8,Text Classification,,0.0263,,,,2393,,1.2,8356,—（网关未暴露）
+C 只收输入,@cf/pfnet/plamo-embedding-1b,Text Embeddings,,0.0186,,,,1693,,0.8,11816,—（网关未暴露）
+C 只收输入,@cf/qwen/qwen3-embedding-0.6b,Text Embeddings,8192,0.0118,,,,1074,,0.5,18625,—（网关未暴露）
+D 双向收费,@cf/deepseek-ai/deepseek-r1-distill-qwen-32b,Text Generation,80000,0.497,4.881,,,45227,444171,155.9,64,/v1/chat/completions
+D 双向收费,@cf/qwen/qwen3.8-27b,Text Generation,262144,0.45,3.2,0.05,,40950,291200,107.8,92,/v1/chat/completions
+D 双向收费,@cf/meta/llama-3.3-70b-instruct-fp8-fast,Text Generation,24000,0.293,2.253,,,26663,205023,74.8,133,/v1/chat/completions
+D 双向收费,@cf/nvidia/nemotron-3-120b-a12b,Text Generation,256000,0.5,1.5,,,45500,136500,63.7,156,/v1/chat/completions
+D 双向收费,@cf/moondream/moondream3.1-9B-A2B,Image-to-Text,,0.3,1,,,27300,91000,40.9,244,—（网关未暴露）
+D 双向收费,@cf/qwen/qwen2.5-coder-32b-instruct,Text Generation,32768,0.66,1,,,60060,91000,57.3,174,/v1/chat/completions
+D 双向收费,@cf/qwen/qwq-32b,Text Generation,24000,0.66,1,,,60060,91000,57.3,174,/v1/chat/completions
+D 双向收费,@cf/meta/llama-4-scout-17b-16e-instruct,Text Generation,131000,0.27,0.85,,,24570,77350,35.5,281,/v1/chat/completions
+D 双向收费,@cf/openai/gpt-oss-120b,Text Generation,128000,0.35,0.75,,,31850,68250,36.4,274,/v1/chat/completions
+D 双向收费,@cf/meta/llama-3.2-11b-vision-instruct,Text Generation,128000,0.0485,0.676,,,4414,61516,20.7,483,/v1/chat/completions
+D 双向收费,@cf/aisingapore/gemma-sea-lion-v4-27b-it,Text Generation,128000,0.351,0.555,,,31941,50505,31.1,321,/v1/chat/completions
+D 双向收费,@cf/mistralai/mistral-small-3.1-24b-instruct,Text Generation,128000,0.351,0.555,,,31941,50505,31.1,321,/v1/chat/completions
+D 双向收费,@cf/zai-org/glm-4.7-flash,Text Generation,131072,0.0605,0.4,,,5506,36400,13.7,731,/v1/chat/completions
+D 双向收费,@cf/ai4bharat/indictrans2-en-indic-1B,Translation,,0.342,0.342,,,31122,31122,24.9,401,—（网关未暴露）
+D 双向收费,@cf/meta/m2m100-1.2b,Translation,,0.342,0.342,,,31122,31122,24.9,401,—（网关未暴露）
+D 双向收费,@cf/meta/llama-3.2-3b-instruct,Text Generation,80000,0.0509,0.335,,,4632,30485,11.5,872,/v1/chat/completions
+D 双向收费,@cf/qwen/qwen3-30b-a3b-fp8,Text Generation,32768,0.0509,0.335,,,4632,30485,11.5,872,/v1/chat/completions
+D 双向收费,@cf/google/gemma-4-26b-a4b-it,Text Generation,256000,0.1,0.3,0.05,,9100,27300,12.7,784,/v1/chat/completions
+D 双向收费,@cf/openai/gpt-oss-20b,Text Generation,128000,0.2,0.3,,,18200,27300,17.3,578,/v1/chat/completions
+D 双向收费,@cf/meta/llama-3.1-8b-instruct-fp8,Text Generation,32000,0.152,0.287,,,13832,26117,14.8,677,/v1/chat/completions
+D 双向收费,@cf/meta/llama-3.2-1b-instruct,Text Generation,60000,0.027,0.201,,,2457,18291,6.7,1489,/v1/chat/completions
+D 双向收费,@cf/ibm-granite/granite-4.0-h-micro,Text Generation,131000,0.017,0.112,,,1547,10192,3.8,2610,/v1/chat/completions
+D 双向收费,@cf/meta/llama-guard-3-8b,Text Generation,131072,0.484,0.03,,,44044,2730,22.8,437,/v1/chat/completions
+E 按次/分钟计费,@cf/deepgram/aura-1,Text-to-Speech,,,,,per 1k characters=$0.015,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/deepgram/aura-2-en,Text-to-Speech,,,,,per 1k characters=$0.03,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/deepgram/aura-2-es,Text-to-Speech,,,,,per 1k characters=$0.03,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/deepgram/flux,Automatic Speech Recognition,,,,,per audio minute (websocket)=$0.0077,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/deepgram/nova-3,Automatic Speech Recognition,,,,,per audio minute=$0.0052; per audio minute (websocket)=$0.0092,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/leonardo/lucid-origin,Text-to-Image,,,,,per 512 by 512 tile=$0.007; per step=$0.000132,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/leonardo/phoenix-1.0,Text-to-Image,,,,,per 512 by 512 tile=$0.00583; per step=$0.00011,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/microsoft/resnet-50,Image Classification,,,,,per inference request=$2.51e-06,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/myshell-ai/melotts,Text-to-Speech,,,,,per audio minute=$0.000205,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/openai/whisper-large-v3-turbo,Automatic Speech Recognition,,,,,per audio minute=$0.000513,,,—,—,—（网关未暴露）
+E 按次/分钟计费,@cf/pipecat-ai/smart-turn-v2,Dumb Pipe,,,,,per audio minute=$0.000338,,,—,—,—（网关未暴露）
