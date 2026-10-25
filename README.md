@@ -93,6 +93,8 @@ catalog.json   模型目录 + 价格缓存
    （或自定义权限 `Account → Workers AI → Read`）
 3. 复制 token（`cfut_...`，只显示一次）
 
+![](https://tc.ccw.ccwu.cc/1792905040433_file_1792905040433.jpg)
+
 ```bash
 ./cfai.py account add cf-01 \
   --type cloudflare \
