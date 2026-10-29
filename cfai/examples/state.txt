@@ -1,5 +1,0 @@
-Subject: URGENT - checkout is down
-
-Hi, since about 09:10 this morning every customer of ours gets a 500 error at checkout.
-We have tried three browsers and two cards. Nobody in the company can take a payment and we
-are losing roughly $4,000 an hour. Please call me back on the number below as soon as possible.
